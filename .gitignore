@@ -10,3 +10,35 @@ __pycache__/
 input.txt
 env/
 venv/
+
+out-*/                     # nanoGPT default output dirs
+*.pt
+*.ckpt
+*.onnx
+*.jit
+*.trt
+*.npz
+*.npy
+
+# training logs and TensorBoard
+logs/
+*.log
+
+# Weights & Biases local runs and cache
+wandb/
+*.wandb
+
+# data downloaded or pre-tokenised
+data/*
+!data/README.md            # keep an index file if you have one
+!data/prepare.py
+
+# Python build artefacts
+__pycache__/
+*.py[cod]
+*.so
+
+# editor and OS detritus
+.vscode/
+.idea/
+.DS_Store
