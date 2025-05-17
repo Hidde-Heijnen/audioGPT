@@ -33,6 +33,6 @@ mkdir -p "$WANDB_DIR"
 echo "[$(date)] job $SLURM_JOB_ID on $(hostname) GPU:$CUDA_VISIBLE_DEVICES"
 
 cd ~/rds/hpc-work/audioGPT
-python train.py config/train_shakespeare_char.py --wandb_log=True --wandb_run_name=test-gcc1
+python train.py config/examples/train_shakespeare_char.py --wandb_log=True --wandb_run_name=test-gcc1
 
 echo "[$(date)] finished"

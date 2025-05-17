@@ -30,9 +30,9 @@ wandb/
 
 # data downloaded or pre-tokenised
 # ignore all data .txt .pkl or .bin files
-data/*.txt
-data/*.pkl
-data/*.bin
+data/*/*.txt
+data/*/*.pkl
+data/*/*.bin
 
 # keep the README.md file
 !data/README.md            # keep an index file if you have one
