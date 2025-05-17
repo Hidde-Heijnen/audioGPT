@@ -90,24 +90,33 @@ def process_dataset():
     
     DEFAULT_UNK_CONTENT = "<UNK>"
     DEFAULT_EOS_CONTENT = "<EOS>"
-    DEFAULT_BOS_CONTENT = "<BOS>" # Only used if explicitly added to SPECIAL_TOKENS list later
+    DEFAULT_BOS_CONTENT = "<BOS>"
 
     UNK_TOKEN_CONTENT = loaded_special_tokens_map.get("unk_token", {}).get("content", DEFAULT_UNK_CONTENT)
     EOS_TOKEN_CONTENT = loaded_special_tokens_map.get("eos_token", {}).get("content", DEFAULT_EOS_CONTENT)
+    BOS_TOKEN_CONTENT = loaded_special_tokens_map.get("bos_token", {}).get("content", DEFAULT_BOS_CONTENT)
     
     # Decide which special tokens will be actively used and added to the vocab first.
-    # For this script, UNK and EOS are primary. BOS can be added if needed.
-    SPECIAL_TOKENS_LIST = [UNK_TOKEN_CONTENT, EOS_TOKEN_CONTENT]
+    # Order: BOS, EOS, UNK often makes sense if BOS is prepended.
+    SPECIAL_TOKENS_LIST = []
+    if BOS_TOKEN_CONTENT: # Ensure BOS content is not empty
+        SPECIAL_TOKENS_LIST.append(BOS_TOKEN_CONTENT)
+    if EOS_TOKEN_CONTENT:
+        SPECIAL_TOKENS_LIST.append(EOS_TOKEN_CONTENT)
+    if UNK_TOKEN_CONTENT:
+        SPECIAL_TOKENS_LIST.append(UNK_TOKEN_CONTENT)
+    
+    # Remove duplicates if any content strings were identical, preserving first occurrence order
+    seen = set()
+    SPECIAL_TOKENS_LIST = [x for x in SPECIAL_TOKENS_LIST if not (x in seen or seen.add(x))]
+
 
     # If bos_token is defined in the map and you want to use it, add it.
     # For example, if you plan to prepend BOS to sequences:
     if "bos_token" in loaded_special_tokens_map and loaded_special_tokens_map["bos_token"].get("content"):
-        BOS_TOKEN_CONTENT = loaded_special_tokens_map["bos_token"]["content"]
-        if BOS_TOKEN_CONTENT not in SPECIAL_TOKENS_LIST: # Avoid duplicates if content is same as UNK/EOS
-             # Decide if BOS should be part of the initial SPECIAL_TOKENS_LIST
-             # For now, we are not adding it to SPECIAL_TOKENS_LIST to maintain current script's primary use of UNK/EOS
-             # but it will be available in meta.pkl if defined in special_tokens_map.json
-             pass # print(f"BOS token ('{BOS_TOKEN_CONTENT}') loaded but not added to active SPECIAL_TOKENS_LIST for vocab.")
+        # For now, we are not adding it to SPECIAL_TOKENS_LIST to maintain current script's primary use of UNK/EOS
+        # but it will be available in meta.pkl if defined in special_tokens_map.json
+        pass # print(f"BOS token ('{BOS_TOKEN_CONTENT}') loaded but not added to active SPECIAL_TOKENS_LIST for vocab.")
     else:
         # BOS_TOKEN_CONTENT = DEFAULT_BOS_CONTENT # It's already default
         pass
@@ -149,11 +158,12 @@ def process_dataset():
     vocab_size = len(itos)
     print(f"Vocabulary size (including special tokens {SPECIAL_TOKENS_LIST}): {vocab_size}")
     
-    unk_token_id = stoi[UNK_TOKEN_CONTENT]
-    eos_token_id = stoi[EOS_TOKEN_CONTENT]
+    unk_token_id = stoi.get(UNK_TOKEN_CONTENT) # Use .get() for safety if UNK_TOKEN_CONTENT ended up empty or not added
+    eos_token_id = stoi.get(EOS_TOKEN_CONTENT)
+    bos_token_id = stoi.get(BOS_TOKEN_CONTENT) # Get BOS token ID
 
     # --- Step 2: Encode Train and Validation Data ---
-    def encode_file(input_filepath, output_filepath, current_stoi, current_eos_id, current_unk_id):
+    def encode_file(input_filepath, output_filepath, current_stoi, current_bos_id, current_eos_id, current_unk_id): # Added current_bos_id
         print(f"Encoding {input_filepath}...")
         all_token_ids = []
         num_stories = 0
@@ -163,8 +173,14 @@ def process_dataset():
                 if not story_tokens:
                     continue
                 
-                story_ids = [current_stoi.get(token, current_unk_id) for token in story_tokens]
-                story_ids.append(current_eos_id) # Append EOS to each story
+                story_ids = []
+                if current_bos_id is not None: # Prepend BOS if it exists
+                    story_ids.append(current_bos_id)
+                
+                story_ids.extend([current_stoi.get(token, current_unk_id) for token in story_tokens])
+                
+                if current_eos_id is not None: # Append EOS if it exists
+                    story_ids.append(current_eos_id)
                 all_token_ids.extend(story_ids)
                 num_stories +=1
                 if (i + 1) % 50000 == 0:
@@ -176,8 +192,8 @@ def process_dataset():
         print(f"Saved tokenized data to {output_filepath}.")
         return len(token_ids_np), num_stories
 
-    train_tokens_count, train_stories_count = encode_file(RAW_TRAIN_FILE, TRAIN_BIN_FILE, stoi, eos_token_id, unk_token_id)
-    val_tokens_count, val_stories_count = encode_file(RAW_VALID_FILE, VALID_BIN_FILE, stoi, eos_token_id, unk_token_id)
+    train_tokens_count, train_stories_count = encode_file(RAW_TRAIN_FILE, TRAIN_BIN_FILE, stoi, bos_token_id, eos_token_id, unk_token_id) # Pass bos_token_id
+    val_tokens_count, val_stories_count = encode_file(RAW_VALID_FILE, VALID_BIN_FILE, stoi, bos_token_id, eos_token_id, unk_token_id)   # Pass bos_token_id
 
     # --- Step 3: Save Metadata (compatible with nanoGPT train.py) ---
     meta = {
@@ -191,10 +207,13 @@ def process_dataset():
     print(f"Metadata saved to {META_FILE}")
     # Updated print examples to use dynamic content
     if UNK_TOKEN_CONTENT in stoi and EOS_TOKEN_CONTENT in stoi:
-        print(f"  stoi example: {{'{UNK_TOKEN_CONTENT}': {stoi[UNK_TOKEN_CONTENT]}, '{EOS_TOKEN_CONTENT}': {stoi[EOS_TOKEN_CONTENT]}, ...}}")
+        example_stoi_output = f"'{UNK_TOKEN_CONTENT}': {stoi[UNK_TOKEN_CONTENT]}, '{EOS_TOKEN_CONTENT}': {stoi[EOS_TOKEN_CONTENT]}"
+        if BOS_TOKEN_CONTENT in stoi:
+             example_stoi_output = f"'{BOS_TOKEN_CONTENT}': {stoi[BOS_TOKEN_CONTENT]}, " + example_stoi_output
+        print(f"  stoi example: {{{example_stoi_output}, ...}}")
     else:
-        print("  stoi example: UNK/EOS tokens not found in stoi for example print.")
-    print(f"  itos example: {itos[:min(len(itos), 3)]} ...")
+        print("  stoi example: UNK/EOS/BOS tokens not found in stoi for example print.")
+    print(f"  itos example: {itos[:min(len(itos), 4)]} ...") # Show more if BOS is there
 
 
 def main():

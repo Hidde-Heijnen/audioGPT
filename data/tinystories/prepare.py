@@ -106,15 +106,18 @@ def encode_file_with_custom_tokenizer(filepath, tokenizer_instance, output_path)
     all_token_ids = []
     print(f"Tokenizing {filepath} with custom tokenizer logic...")
 
-    # This is the original ID string for EOS (e.g. GPT-2's <|endoftext|>)
-    # The custom tokenizer adds this to its vocab and uses its new index as the OOV token.
-    original_eos_id_str = "50256" 
-    # Get the new vocabulary index for what was originally "50256"
-    # This will also be used for OOV tokens.
-    oov_token_new_idx = tokenizer_instance.top_k_tokens_dict.get(original_eos_id_str)
+    # Determine the OOV token index from the custom tokenizer (typically EOS's new index)
+    # The tokenizer.py now ensures eos_token_id_str is in top_k_tokens_dict if k is used.
+    eos_token_id_str_from_base = str(tokenizer_instance.tokenizer.eos_token_id)
+    oov_token_new_idx = tokenizer_instance.top_k_tokens_dict.get(eos_token_id_str_from_base)
     if oov_token_new_idx is None:
-        # This should not happen based on tokenizer.py logic which appends "50256"
-        raise ValueError(f"Critical: Original EOS ID '{original_eos_id_str}' not found in custom tokenizer's top_k_tokens_dict.")
+        if tokenizer_instance.top_k_tokens_dict: # If dict is not empty but EOS is missing (should not happen with new tokenizer.py)
+            # Fallback to the last token in the custom vocab as OOV if EOS is unexpectedly not there
+            oov_token_new_idx = len(tokenizer_instance.top_k_tokens_dict) - 1 
+            print(f"Warning: EOS token ID {eos_token_id_str_from_base} not found in custom vocab map. Using {oov_token_new_idx} as OOV index.")
+        elif tokenizer_instance.k : # k is active but dict is empty (error)
+             raise ValueError("Critical: Custom tokenizer's top_k_tokens_dict is empty when k is active.")
+        # if not k, then oov_token_new_idx won't be used by the mapping loop below if not self.k in tokenizer.encoder
 
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f):
@@ -122,24 +125,29 @@ def encode_file_with_custom_tokenizer(filepath, tokenizer_instance, output_path)
             if not line:
                 continue
             
-            # Tokenize using the base tokenizer (from our custom_tokenizer instance)
-            # add_special_tokens=False because we handle EOS explicitly per story.
+            # Tokenize using the base tokenizer. tokenizer.py's encoder now defaults to add_special_tokens=True.
+            # This call simulates what tokenizer_instance.encoder() would do for the first part.
             encoded_output = tokenizer_instance.tokenizer(
                 line,
-                add_special_tokens=False,
+                add_special_tokens=True, # Let base tokenizer add BOS/EOS
                 return_attention_mask=False,
-                return_token_type_ids=False
+                return_token_type_ids=False,
+                truncation=True, # Recommended to add truncation and max_length matching training
+                max_length=tokenizer_instance.tokenizer.model_max_length
             )
             original_ids = encoded_output['input_ids']
 
             new_ids_for_line = []
-            for token_id in original_ids:
-                # Map to new vocabulary, defaulting to the new OOV token index
-                mapped_id = tokenizer_instance.top_k_tokens_dict.get(str(token_id), oov_token_new_idx)
-                new_ids_for_line.append(mapped_id)
+            if tokenizer_instance.k: # Mapping to k-limited vocab is only if k is set
+                for token_id in original_ids:
+                    # Map to new vocabulary, defaulting to the new OOV token index (EOS's new index)
+                    mapped_id = tokenizer_instance.top_k_tokens_dict.get(str(token_id), oov_token_new_idx)
+                    new_ids_for_line.append(mapped_id)
+            else: # If not k-limited, use original_ids directly
+                new_ids_for_line.extend(original_ids)
             
             # Add the new OOV/EOS token ID at the end of each story's tokens
-            new_ids_for_line.append(oov_token_new_idx)
+            # new_ids_for_line.append(oov_token_new_idx) # No longer needed, add_special_tokens=True handles EOS.
             
             all_token_ids.extend(new_ids_for_line)
 
