@@ -10,6 +10,7 @@ import pickle
 # --- Configuration ---
 # DATA_DIR is the directory where this script (prepare_word.py) is located.
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+SPECIAL_TOKENS_MAP_FILE = os.path.join(DATA_DIR, "special_tokens_map.json") # Path to special_tokens_map.json
 
 RAW_TRAIN_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-train.txt")
 RAW_VALID_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-valid.txt")
@@ -20,11 +21,11 @@ TRAIN_BIN_FILE = os.path.join(DATA_DIR, "train_word.bin")
 VALID_BIN_FILE = os.path.join(DATA_DIR, "val_word.bin")
 META_FILE = os.path.join(DATA_DIR, "meta_word.pkl")
 
-# Special tokens
-UNK_TOKEN = "<UNK>"
-EOS_TOKEN = "<EOS>"
+# Special tokens - These will be overridden by special_tokens_map.json if present
+# UNK_TOKEN = "<UNK>"
+# EOS_TOKEN = "<EOS>"
 # BOS_TOKEN = "<BOS>" # Optional, nanoGPT doesn't strictly require it for its typical setup
-SPECIAL_TOKENS = [UNK_TOKEN, EOS_TOKEN] # Add BOS_TOKEN here if you decide to use it
+# SPECIAL_TOKENS = [UNK_TOKEN, EOS_TOKEN] # Add BOS_TOKEN here if you decide to use it
 
 # --- Helper Functions ---
 
@@ -72,6 +73,46 @@ def process_dataset():
     Builds vocabulary from training data, saves word counts,
     encodes train/validation sets, and saves metadata.
     """
+
+    # --- Load Special Tokens ---
+    print(f"Attempting to load special tokens from {SPECIAL_TOKENS_MAP_FILE}...")
+    loaded_special_tokens_map = {}
+    if os.path.exists(SPECIAL_TOKENS_MAP_FILE):
+        with open(SPECIAL_TOKENS_MAP_FILE, 'r', encoding='utf-8') as f:
+            loaded_special_tokens_map = json.load(f)
+        print(f"Successfully loaded special tokens: {list(loaded_special_tokens_map.keys())}")
+    else:
+        print(f"Warning: {SPECIAL_TOKENS_MAP_FILE} not found. Using default special token values.")
+
+    # Define special tokens based on the loaded map or defaults
+    # The order in SPECIAL_TOKENS list matters for vocab indexing if they are the first ones added.
+    # We'll prioritize standard ones like UNK, EOS, BOS if they are to be used.
+    
+    DEFAULT_UNK_CONTENT = "<UNK>"
+    DEFAULT_EOS_CONTENT = "<EOS>"
+    DEFAULT_BOS_CONTENT = "<BOS>" # Only used if explicitly added to SPECIAL_TOKENS list later
+
+    UNK_TOKEN_CONTENT = loaded_special_tokens_map.get("unk_token", {}).get("content", DEFAULT_UNK_CONTENT)
+    EOS_TOKEN_CONTENT = loaded_special_tokens_map.get("eos_token", {}).get("content", DEFAULT_EOS_CONTENT)
+    
+    # Decide which special tokens will be actively used and added to the vocab first.
+    # For this script, UNK and EOS are primary. BOS can be added if needed.
+    SPECIAL_TOKENS_LIST = [UNK_TOKEN_CONTENT, EOS_TOKEN_CONTENT]
+
+    # If bos_token is defined in the map and you want to use it, add it.
+    # For example, if you plan to prepend BOS to sequences:
+    if "bos_token" in loaded_special_tokens_map and loaded_special_tokens_map["bos_token"].get("content"):
+        BOS_TOKEN_CONTENT = loaded_special_tokens_map["bos_token"]["content"]
+        if BOS_TOKEN_CONTENT not in SPECIAL_TOKENS_LIST: # Avoid duplicates if content is same as UNK/EOS
+             # Decide if BOS should be part of the initial SPECIAL_TOKENS_LIST
+             # For now, we are not adding it to SPECIAL_TOKENS_LIST to maintain current script's primary use of UNK/EOS
+             # but it will be available in meta.pkl if defined in special_tokens_map.json
+             pass # print(f"BOS token ('{BOS_TOKEN_CONTENT}') loaded but not added to active SPECIAL_TOKENS_LIST for vocab.")
+    else:
+        # BOS_TOKEN_CONTENT = DEFAULT_BOS_CONTENT # It's already default
+        pass
+
+
     # --- Step 1: Build Vocabulary from Training Data & Save Word Counts ---
     print(f"\nStep 1: Building vocabulary and counting word frequencies from {RAW_TRAIN_FILE}...")
     word_counts = Counter()
@@ -94,8 +135,8 @@ def process_dataset():
 
     # Create vocabulary (stoi, itos) including special tokens
     # Special tokens come first
-    stoi = {token: i for i, token in enumerate(SPECIAL_TOKENS)}
-    itos = list(SPECIAL_TOKENS)
+    stoi = {token: i for i, token in enumerate(SPECIAL_TOKENS_LIST)}
+    itos = list(SPECIAL_TOKENS_LIST)
     
     # Add words from training data
     # Option: Limit vocabulary size here if desired, e.g., by taking top N from sorted_word_counts
@@ -106,10 +147,10 @@ def process_dataset():
             stoi[word] = len(itos) - 1
             
     vocab_size = len(itos)
-    print(f"Vocabulary size (including special tokens): {vocab_size}")
+    print(f"Vocabulary size (including special tokens {SPECIAL_TOKENS_LIST}): {vocab_size}")
     
-    unk_token_id = stoi[UNK_TOKEN]
-    eos_token_id = stoi[EOS_TOKEN]
+    unk_token_id = stoi[UNK_TOKEN_CONTENT]
+    eos_token_id = stoi[EOS_TOKEN_CONTENT]
 
     # --- Step 2: Encode Train and Validation Data ---
     def encode_file(input_filepath, output_filepath, current_stoi, current_eos_id, current_unk_id):
@@ -143,12 +184,17 @@ def process_dataset():
         'vocab_size': vocab_size,
         'itos': itos,
         'stoi': stoi,
+        'special_tokens_map': loaded_special_tokens_map # Store the loaded special tokens map
     }
     with open(META_FILE, 'wb') as f: # Save as pickle binary
         pickle.dump(meta, f)
     print(f"Metadata saved to {META_FILE}")
-    print(f"  stoi example: {{'{itos[SPECIAL_TOKENS.index(UNK_TOKEN)]}': {stoi[UNK_TOKEN]}, '{itos[SPECIAL_TOKENS.index(EOS_TOKEN)]}': {stoi[EOS_TOKEN]}, '{itos[len(SPECIAL_TOKENS)]}': {stoi[itos[len(SPECIAL_TOKENS)]]} ...}}")
-    print(f"  itos example: ['{itos[0]}', '{itos[1]}', '{itos[2]}', ...]")
+    # Updated print examples to use dynamic content
+    if UNK_TOKEN_CONTENT in stoi and EOS_TOKEN_CONTENT in stoi:
+        print(f"  stoi example: {{'{UNK_TOKEN_CONTENT}': {stoi[UNK_TOKEN_CONTENT]}, '{EOS_TOKEN_CONTENT}': {stoi[EOS_TOKEN_CONTENT]}, ...}}")
+    else:
+        print("  stoi example: UNK/EOS tokens not found in stoi for example print.")
+    print(f"  itos example: {itos[:min(len(itos), 3)]} ...")
 
 
 def main():

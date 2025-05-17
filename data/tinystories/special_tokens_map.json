@@ -1,13 +1,13 @@
 {
   "bos_token": {
-    "content": "<|endoftext|>",
+    "content": "<|startoftext|>",
     "lstrip": false,
     "normalized": true,
     "rstrip": false,
     "single_word": false
   },
   "eos_token": {
-    "content": "<|endoftext|>",
+    "content": "<|unknown|>",
     "lstrip": false,
     "normalized": true,
     "rstrip": false,
