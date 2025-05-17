@@ -29,7 +29,8 @@ wandb/
 *.wandb
 
 # data downloaded or pre-tokenised
-data/*
+data/shakespeare_char/
+data/tinystories/
 !data/README.md            # keep an index file if you have one
 !data/prepare.py
 
