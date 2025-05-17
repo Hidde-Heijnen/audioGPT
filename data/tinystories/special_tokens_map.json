@@ -7,14 +7,14 @@
     "single_word": false
   },
   "eos_token": {
-    "content": "<|unknown|>",
+    "content": "<|endoftext|>",
     "lstrip": false,
     "normalized": true,
     "rstrip": false,
     "single_word": false
   },
   "unk_token": {
-    "content": "<|endoftext|>",
+    "content": "<|unknown|>",
     "lstrip": false,
     "normalized": true,
     "rstrip": false,
