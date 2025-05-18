@@ -29,10 +29,13 @@ wandb/
 *.wandb
 
 # data downloaded or pre-tokenised
-# ignore all data .txt .pkl or .bin files
-data/*/*.txt
-data/*/*.pkl
-data/*/*.bin
+# ignore all data files recursively
+**/data/**/*.txt
+**/data/**/*.pkl
+**/data/**/*.bin
+
+data/cleanstories/cleaned/lines/tinystories_train_gpt4_lines.txt
+data/cleanstories/cleaned/lines/tinystories_valid_gpt4_lines.txt
 
 # keep the README.md file
 !data/README.md            # keep an index file if you have one
@@ -47,3 +50,4 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+

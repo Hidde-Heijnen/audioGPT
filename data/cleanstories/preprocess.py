@@ -35,7 +35,7 @@ INPUT_RAW_STORY_FILE_VALID = "TinyStoriesV2-GPT4-valid.txt" # Replace with your 
 # Directory where the cleaned files will be saved.
 # This script will create this directory if it doesn't exist.
 # The prepare.py and prepare_word.py scripts expect cleaned files in 'data/tinystories/'
-OUTPUT_DIR = "data/tinystories"
+OUTPUT_DIR = "cleaned/lines"
 CLEANED_TRAIN_FILE = os.path.join(OUTPUT_DIR, "tinystories_train_cleaned.txt")
 CLEANED_VALID_FILE = os.path.join(OUTPUT_DIR, "tinystories_valid_cleaned.txt")
 
@@ -76,23 +76,27 @@ def preprocess_raw_story_file(input_path, output_path, delimiter):
             # 1. Strip leading/trailing whitespace from the raw story segment
             cleaned_story = story_text.strip()
 
-            if cleaned_story: # Process only if the story is not empty after stripping
-                # 2. Replace multiple spaces with a single space
+            if cleaned_story: # Process only if the story is not empty after initial stripping
+                # 2. Convert the story into a single line of text.
+                #    a. Replace all newline characters with a space. This helps to
+                #       bring all content onto one conceptual line.
+                cleaned_story = cleaned_story.replace('\n', ' ')
+
+                #    b. Replace multiple consecutive spaces with a single space.
+                #       This cleans up spaces that were originally multiple, or became multiple
+                #       after newline replacement (e.g., "word1 \n word2" -> "word1   word2" -> "word1 word2").
                 cleaned_story = re.sub(r' +', ' ', cleaned_story)
 
-                # 3. Normalize newlines:
-                #    - Replace multiple newlines (possibly with spaces between them) with a single newline.
-                #    - This helps ensure consistent line breaks within a story if desired,
-                #      but the main goal is one story per line in the output.
-                cleaned_story = re.sub(r'\n\s*\n', '\n', cleaned_story)
+                #    c. Strip leading/trailing whitespace again. This is important in case
+                #       the original story segment, after stripping, started/ended with
+                #       newlines (e.g. "\nHello\n" became " Hello "), or if the story
+                #       was composed only of whitespace and newlines that became a single space.
+                cleaned_story = cleaned_story.strip()
                 
-                # 4. Remove any remaining newlines within the story if you want each story
-                #    to be a single continuous block of text on its line in the output file.
-                #    If you want to preserve intra-story newlines, comment out the next line.
-                # cleaned_story = cleaned_story.replace('\n', ' ') # Optional: makes each story one long line
-
-                f_out.write(cleaned_story + '\n')
-                num_processed_stories += 1
+                # 3. Write the cleaned story if it's not empty after all transformations.
+                if cleaned_story:
+                    f_out.write(cleaned_story + '\n')
+                    num_processed_stories += 1
             
             if (i + 1) % 1000 == 0:
                 print(f"  Processed {i+1}/{len(stories)} story segments from {input_path}...")

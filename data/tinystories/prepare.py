@@ -13,8 +13,8 @@ from tokenizer import Tokenizer # Import directly as tokenizer.py is in the same
 # DATA_DIR is the directory where this script (prepare.py) is located.
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
-RAW_TRAIN_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-train-og.txt")
-RAW_VALID_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT4-valid-og.txt")
+RAW_TRAIN_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT3-train-og.txt")
+RAW_VALID_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT3-valid-og.txt")
 TOKEN_COUNTS_FILE = os.path.join(DATA_DIR, "tinystories_token_counts.json")
 SPECIAL_TOKENS_MAP_FILE = os.path.join(DATA_DIR, "special_tokens_map.json")
 TOKENIZER_CONFIG_NAME = "EleutherAI/gpt-neo-125M" # Changed from "gpt2"

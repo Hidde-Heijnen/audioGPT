@@ -40,11 +40,11 @@ class Tokenizer:
 
       # Prepare a list of essential special token IDs (as strings)
       essential_special_ids = []
-      eos_token_id_str = str(self.tokenizer.eos_token_id) if self.tokenizer.eos_token_id is not None else None
+      self.eos_token_id_str = str(self.tokenizer.eos_token_id) if self.tokenizer.eos_token_id is not None else None
       bos_token_id_str = str(self.tokenizer.bos_token_id) if self.tokenizer.bos_token_id is not None else None
       # unk_token_id_str = str(self.tokenizer.unk_token_id) if self.tokenizer.unk_token_id is not None else None # Optional: if UNK needs special handling in k-limited vocab
 
-      if eos_token_id_str: essential_special_ids.append(eos_token_id_str)
+      if self.eos_token_id_str: essential_special_ids.append(self.eos_token_id_str)
       if bos_token_id_str: essential_special_ids.append(bos_token_id_str)
       # if unk_token_id_str: essential_special_ids.append(unk_token_id_str)
 
@@ -87,7 +87,7 @@ class Tokenizer:
       # Default OOV mapping to the new index of EOS token, if EOS is in vocab.
       # Otherwise, this could error if eos_token_id_str is not in top_k_tokens_dict.
       # The initialization logic above should ensure eos_token_id_str is present.
-      default_map_idx = self.top_k_tokens_dict.get(eos_token_id_str) 
+      default_map_idx = self.top_k_tokens_dict.get(self.eos_token_id_str) 
       if default_map_idx is None and self.top_k_tokens: # Fallback if EOS somehow missing, use last token in vocab as OOV
           default_map_idx = len(self.top_k_tokens) -1 
       elif default_map_idx is None: # No tokens at all, cannot map

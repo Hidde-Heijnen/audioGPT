@@ -8,10 +8,18 @@ import torch
 import tiktoken
 from model import GPTConfig, GPT
 
+# Conditional import for Tokenizer
+try:
+    from data.tinystories.tokenizer import Tokenizer as TinyStoriesTokenizer
+    TINYSTORIES_TOKENIZER_AVAILABLE = True
+except ImportError:
+    TINYSTORIES_TOKENIZER_AVAILABLE = False
+    TinyStoriesTokenizer = None # Placeholder if import fails
+
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+start = "<|startoftext|>" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
@@ -53,32 +61,103 @@ model.to(device)
 if compile:
     model = torch.compile(model) # requires PyTorch 2.0 (optional)
 
-# look for the meta pickle in case it is available in the dataset folder
-load_meta = False
-if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
-    meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
-    load_meta = os.path.exists(meta_path)
-if load_meta:
-    print(f"Loading meta from {meta_path}...")
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
-    stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: ''.join([itos[i] for i in l])
+# --- Tokenizer setup ---
+encode = None
+decode = None
+dataset_name = None
+
+if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
+    dataset_name = checkpoint['config']['dataset']
+
+if dataset_name == 'tinystories':
+    if not TINYSTORIES_TOKENIZER_AVAILABLE:
+        # Provide a more informative error or fallback if TinyStoriesTokenizer is None
+        error_msg = "TinyStories dataset specified, but 'data.tinystories.tokenizer.Tokenizer' could not be imported. "
+        error_msg += "Ensure tokenizer.py is in data/tinystories/ and the environment is set up correctly."
+        raise ImportError(error_msg)
+    
+    print("Using TinyStories custom tokenizer.")
+
+    # Define LocalTokenizerConfig, similar to what prepare.py might use internally
+    class LocalTokenizerConfig:
+        def __init__(self, name):
+            self.name = name
+
+    tokenizer_config_name = "EleutherAI/gpt-neo-125M" # Default from tinystories/prepare.py
+    top_k_val = 10000 # Default from tinystories/prepare.py
+    
+    # Construct path to token_counts.json
+    # Assumes sample.py is run from the project root directory (e.g., audioGPT/)
+    # and data/tinystories/ is a subdirectory.
+    token_counts_path = os.path.join('data', dataset_name, 'tinystories_token_counts.json')
+
+    if not os.path.exists(token_counts_path):
+        raise FileNotFoundError(
+            f"Token counts file not found for TinyStories: {token_counts_path}. "
+            f"Please ensure 'prepare.py' for the 'tinystories' dataset has been run successfully."
+        )
+
+    custom_tokenizer = TinyStoriesTokenizer(
+        config=LocalTokenizerConfig(tokenizer_config_name),
+        k=top_k_val,
+        file_path=token_counts_path,
+        device=device # Use the main script's device (e.g., 'cuda:0' or 'cpu')
+    )
+
+    # Encoder: string -> tensor of token IDs (shape (1, seq_len))
+    # The custom_tokenizer.encoder handles add_special_tokens and returns a tensor on the correct device.
+    encode = lambda s: custom_tokenizer.encoder(s, add_special_tokens=True)
+
+    # Decoder: list of token IDs (for one sample) -> string
+    # custom_tokenizer.decoder expects a 2D list/tensor of tokens.
+    decode = lambda l: custom_tokenizer.decoder(torch.tensor([l], dtype=torch.long, device=device))[0]
+
 else:
-    # ok let's assume gpt-2 encodings by default
-    print("No meta.pkl found, assuming GPT-2 encodings...")
-    enc = tiktoken.get_encoding("gpt2")
-    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-    decode = lambda l: enc.decode(l)
+    # Original logic for meta.pkl or tiktoken
+    load_meta = False
+    # Check for meta.pkl if not using tinystories custom tokenizer path
+    if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
+        # dataset_name would have been set earlier
+        meta_path = os.path.join('data', dataset_name, 'meta.pkl')
+        if os.path.exists(meta_path):
+            load_meta = True
+        else:
+            print(f"Meta file not found at {meta_path} for dataset '{dataset_name}'.")
+
+    if load_meta:
+        print(f"Loading meta from {meta_path}...")
+        with open(meta_path, 'rb') as f:
+            meta = pickle.load(f)
+        # TODO want to make this more general to arbitrary encoder/decoder schemes
+        # This assumes meta['stoi'] and meta['itos'] are for character-level or simple tokenization
+        # If meta.pkl was from tinystories but this path was taken, this might be an issue.
+        # The primary `if dataset_name == 'tinystories'` block should handle it.
+        stoi, itos = meta['stoi'], meta['itos']
+        encode = lambda s: [stoi[c] for c in s] # Assumes s is iterable and c is in stoi (char-level)
+        decode = lambda l: ''.join([itos[i] for i in l])
+    else:
+        # Fallback to GPT-2 encodings if not tinystories and no meta.pkl
+        print("No meta.pkl found or not using a recognized custom tokenizer setup, assuming GPT-2 encodings...")
+        enc = tiktoken.get_encoding("gpt2")
+        encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+        decode = lambda l: enc.decode(l)
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
-start_ids = encode(start)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+if dataset_name == 'tinystories' and TINYSTORIES_TOKENIZER_AVAILABLE:
+    # encode() from custom_tokenizer returns a tensor (usually shape (1, T))
+    x = encode(start)
+    # Ensure x is on the correct device, though custom_tokenizer.encoder should handle it.
+    x = x.to(device)
+    if x.dim() == 1: # Should already be 2D from tokenizer, but as a safeguard
+        x = x.unsqueeze(0)
+else:
+    # Original logic: encode returns a list of ints
+    start_ids = encode(start)
+    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 # run generation
 with torch.no_grad():
