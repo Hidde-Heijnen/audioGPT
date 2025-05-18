@@ -11,24 +11,28 @@ wandb_project = 'tinystories'
 wandb_run_name = 'tiny-8M'
 
 dataset = 'tinystories'
-gradient_accumulation_steps = 1
-batch_size = 64
-block_size = 256         # context length of 256 tokens
+gradient_accumulation_steps = 16 # Target: 16
+batch_size = 80            # Target: 80
+block_size = 512           # Target: 512, context length
 
 # model: hidden_size=256, 8 layers, 16 heads → ≈8.9M parameters
 n_layer = 8
 n_head = 16
 n_embd = 256
-dropout = 0.1
+dropout = 0.0            # Updated from 0.1 to 0.0 based on JSON (attention_dropout, etc.)
 
-learning_rate = 5e-4     # a bit lower for stable training
+learning_rate = 5e-4     # Target: 5e-4
 max_iters = 5000
-lr_decay_iters = 5000    # linear decay over full training
-min_lr = 5e-5            # 1/10 of initial LR
-beta2 = 0.99             # smoother second moment
+# lr_decay_iters, min_lr, and warmup_iters are removed as decay_lr = False
+decay_lr = False         # Target: lr_schedule = constant
+min_lr = 5e-5            # This will be ignored due to decay_lr = False, kept for reference or easy toggle
+beta1 = 0.9              # Target: adam_beta1=0.9 (explicitly set)
+beta2 = 0.95             # Target: adam_beta2 = 0.95 (changed from 0.99)
+weight_decay = 0.1       # Target: wd=0.1 (explicitly set)
 
-warmup_iters = 100       # short warmup period
+warmup_iters = 100       # This will be ignored due to decay_lr = False for LR scheduling, kept for reference
 
-# device and compilation settings (for MacBooks etc.)
+# device and compilation settings
+dtype = 'float32'        # Added based on JSON torch_dtype
 # device = 'cpu'
 # compile = False

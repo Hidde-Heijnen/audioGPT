@@ -174,12 +174,12 @@ def process_dataset():
                     continue
                 
                 story_ids = []
-                if current_bos_id is not None: # Prepend BOS if it exists
+                if current_bos_id is not None: # Prepend BOS if it is not None
                     story_ids.append(current_bos_id)
                 
                 story_ids.extend([current_stoi.get(token, current_unk_id) for token in story_tokens])
                 
-                if current_eos_id is not None: # Append EOS if it exists
+                if current_eos_id is not None: # Append EOS if it is not None
                     story_ids.append(current_eos_id)
                 all_token_ids.extend(story_ids)
                 num_stories +=1
