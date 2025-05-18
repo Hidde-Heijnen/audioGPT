@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=tinystories_8M
 #SBATCH -A MLMI-HRAH2-SL2-GPU          # ← your GPU project
-#SBATCH --partition=ampere
+#SBATCH -p ampere
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2              # ≤3 per GPU is the site rule
 #SBATCH --mem=16G                      # Increased memory for larger batch/context
 #SBATCH --time=04:00:00                # Increased time for more iterations
 #SBATCH --output=logs/%x-%j.out

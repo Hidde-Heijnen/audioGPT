@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=shakespeare_gpt
+#SBATCH --job-name=tinystories_8M
 #SBATCH -A MLMI-HRAH2-SL2-GPU          # ← your GPU project
-#SBATCH --partition=ampere
+#SBATCH -p ampere
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2              # ≤3 per GPU is the site rule
-#SBATCH --mem=8G
-#SBATCH --time=00:05:00
+#SBATCH --mem=16G                      # Increased memory for larger batch/context
+#SBATCH --time=04:00:00                # Increased time for more iterations
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -24,7 +23,7 @@ export TRITON_CACHE_DIR=$HOME/rds/hpc-work/audioGPT/wandb/triton_cache
 mkdir -p "$TRITON_CACHE_DIR"
 # ------------------------------------------------------------------
 
-export WANDB_PROJECT=shakespeare-char
+export WANDB_PROJECT=tinystories
 export WANDB_DIR=$HOME/rds/hpc-work/audioGPT/wandb
 export WANDB_CACHE_DIR=$WANDB_DIR
 export WANDB_MODE=online
@@ -33,6 +32,6 @@ mkdir -p "$WANDB_DIR"
 echo "[$(date)] job $SLURM_JOB_ID on $(hostname) GPU:$CUDA_VISIBLE_DEVICES"
 
 cd ~/rds/hpc-work/audioGPT
-python train.py config/examples/train_shakespeare_char.py --wandb_log=True --wandb_run_name=test-gcc1 --compile=False
+python train.py config/tinystories-8M_float.py --wandb_log=True --wandb_run_name=tinystories-8M-float
 
-echo "[$(date)] finished"
+echo "[$(date)] finished" 

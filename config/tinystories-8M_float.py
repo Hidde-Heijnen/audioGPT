@@ -33,6 +33,6 @@ weight_decay = 0.1       # Target: wd=0.1 (explicitly set)
 warmup_iters = 100       # This will be ignored due to decay_lr = False for LR scheduling, kept for reference
 
 # device and compilation settings
-# dtype = 'float32'        # Added based on JSON torch_dtype
+dtype = 'float32'        # Added based on JSON torch_dtype
 # device = 'cpu'
 # compile = False
