@@ -34,6 +34,8 @@ wandb/
 **/data/**/*.pkl
 **/data/**/*.bin
 
+!data/smallstories/reasoningprompts.txt
+
 data/cleanstories/cleaned/lines/tinystories_train_gpt4_lines.txt
 data/cleanstories/cleaned/lines/tinystories_valid_gpt4_lines.txt
 

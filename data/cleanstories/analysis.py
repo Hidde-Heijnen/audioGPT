@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+import os # Added to create directory if it doesn't exist
 
 # %% These are big files, so we might want to read them in chunks. each line is a story.
 TRAIN_FILE_INPUT = "cleaned/lines/tinystories_train_gpt4_lines.txt"
@@ -61,33 +62,49 @@ for story in valid_set:
 
 print(f"Number of validation stories also found in train: {valid_in_train_count}")
 
-# %% How many stories start with Once upon a time? (train, validation, total) (number out of total, and percentage)
-PREFIX = "once upon a time" # Use lowercase for case-insensitive comparison
+def count_stories_with_prefix(train_lines, valid_lines, prefix="once upon a time"):
+    """
+    Count stories that start with a given prefix in both train and validation sets.
+    
+    Args:
+        train_lines (list): List of training stories
+        valid_lines (list): List of validation stories
+        prefix (str): The prefix to search for (case-insensitive)
+    
+    Returns:
+        tuple: (train_count, valid_count, total_count, train_percent, valid_percent, total_percent)
+    """
+    prefix = prefix.lower()  # Use lowercase for case-insensitive comparison
+    
+    train_prefix_count = sum(1 for story in train_lines if story.lower().startswith(prefix))
+    valid_prefix_count = sum(1 for story in valid_lines if story.lower().startswith(prefix))
+    
+    total_stories = len(train_lines) + len(valid_lines)
+    total_prefix_count = train_prefix_count + valid_prefix_count
+    
+    # Calculate percentages
+    percent_train_prefix = (train_prefix_count / len(train_lines)) * 100 if len(train_lines) > 0 else 0
+    percent_valid_prefix = (valid_prefix_count / len(valid_lines)) * 100 if len(valid_lines) > 0 else 0
+    percent_total_prefix = (total_prefix_count / total_stories) * 100 if total_stories > 0 else 0
+    
+    print(f"\n--- Stories Starting with '{prefix}' ---")
+    print(f"Train: {train_prefix_count} out of {len(train_lines)} ({percent_train_prefix:.2f}%)")
+    print(f"Valid: {valid_prefix_count} out of {len(valid_lines)} ({percent_valid_prefix:.2f}%)")
+    print(f"Total: {total_prefix_count} out of {total_stories} ({percent_total_prefix:.2f}%)")
+    
+    return (train_prefix_count, valid_prefix_count, total_prefix_count,
+            percent_train_prefix, percent_valid_prefix, percent_total_prefix)
 
-train_prefix_count = 0
-for story in train_lines:
-    if story.lower().startswith(PREFIX):
-        train_prefix_count += 1
+# %%
+count_stories_with_prefix(train_lines, valid_lines, "once upon a time")
 
-valid_prefix_count = 0
-for story in valid_lines:
-    if story.lower().startswith(PREFIX):
-        valid_prefix_count += 1
+# %%
+count_stories_with_prefix(train_lines, valid_lines, "one day")
+# %%
 
-total_stories = len(train_lines) + len(valid_lines)
-total_prefix_count = train_prefix_count + valid_prefix_count
+count_stories_with_prefix(train_lines, valid_lines, "once,")
 
-# Calculate percentages
-percent_train_prefix = (train_prefix_count / len(train_lines)) * 100 if len(train_lines) > 0 else 0
-percent_valid_prefix = (valid_prefix_count / len(valid_lines)) * 100 if len(valid_lines) > 0 else 0
-percent_total_prefix = (total_prefix_count / total_stories) * 100 if total_stories > 0 else 0
-
-print(f"\n--- Stories Starting with '{PREFIX}' ---")
-print(f"Train: {train_prefix_count} out of {len(train_lines)} ({percent_train_prefix:.2f}%)")
-print(f"Valid: {valid_prefix_count} out of {len(valid_lines)} ({percent_valid_prefix:.2f}%)")
-print(f"Total: {total_prefix_count} out of {total_stories} ({percent_total_prefix:.2f}%)")
-
-# %% Create a file with the tokens (so word or punctuation) and the number of times it appears in train and valid, treat numbers as words as well
+# %% Create a csv file with the tokens (so word or punctuation) and the number of times it appears in train and valid, treat numbers as words as well
 
 def _tokenize_line(line):
     """Helper function to tokenize a single line according to the project's rules."""
@@ -99,14 +116,7 @@ def _tokenize_line(line):
 def get_tokens(lines):
     tokens = Counter()
     for line in lines:
-        # Split by space, this will keep punctuation attached to words if not separated by space
-        # The problem description says: "Punctuation is split from the words, but not for words like don't and i'm."
-        # This implies the data is already pre-processed to handle this. If not, we'd need more complex tokenization.
-        # Let's assume simple space splitting is enough based on the `cleanstories` name and prior processing.
-        # A more robust tokenizer would use regex to handle various cases of punctuation and contractions.
-        # For now, we convert to lowercase and split by space.
-        # words = line.lower().split() # Old method
-        token_list = _tokenize_line(line) # Use new helper
+        token_list = _tokenize_line(line)
         tokens.update(token_list)
     return tokens
 
@@ -115,21 +125,61 @@ valid_tokens = get_tokens(valid_lines)
 
 all_tokens_combined = train_tokens + valid_tokens
 
-TOKEN_COUNTS_OUTPUT_FILE = "data/cleanstories/token_counts.txt"
+TOKEN_COUNTS_OUTPUT_FILE = "analysis/token_counts.csv"
 
-with open(TOKEN_COUNTS_OUTPUT_FILE, 'w') as f:
-    f.write("Token\tTrain_Count\tValid_Count\tTotal_Count\n")
-    sorted_tokens = sorted(all_tokens_combined.keys())
-    for token in sorted_tokens:
-        train_count = train_tokens.get(token, 0)
-        valid_count = valid_tokens.get(token, 0)
-        total_count = all_tokens_combined.get(token, 0)
-        f.write(f"{token}\t{train_count}\t{valid_count}\t{total_count}\n")
+# Ensure the directory exists before writing the file
+os.makedirs(os.path.dirname(TOKEN_COUNTS_OUTPUT_FILE), exist_ok=True)
+
+
+token_data = []
+sorted_tokens = sorted(all_tokens_combined.keys())
+for token in sorted_tokens:
+    train_count = train_tokens.get(token, 0)
+    valid_count = valid_tokens.get(token, 0)
+    total_count = all_tokens_combined.get(token, 0)
+    token_data.append({
+        'Token': token,
+        'Train_Count': train_count,
+        'Valid_Count': valid_count,
+        'Total_Count': total_count
+    })
+
+df = pd.DataFrame(token_data)
+df.to_csv(TOKEN_COUNTS_OUTPUT_FILE, index=False)
 
 print(f"Token counts written to {TOKEN_COUNTS_OUTPUT_FILE}")
 print(f"Total unique tokens in train: {len(train_tokens)}")
 print(f"Total unique tokens in valid: {len(valid_tokens)}")
 print(f"Total unique tokens overall: {len(all_tokens_combined)}")
+
+# %% Any stories shorter than 5 words (in train, valid)
+MIN_WORDS = 5
+
+short_stories_train = []
+for story in train_lines:
+    tokens = _tokenize_line(story)
+    if len(tokens) < MIN_WORDS:
+        short_stories_train.append(story.strip()) # strip to remove leading/trailing whitespace for display
+
+short_stories_valid = []
+for story in valid_lines:
+    tokens = _tokenize_line(story)
+    if len(tokens) < MIN_WORDS:
+        short_stories_valid.append(story.strip())
+
+print(f"\n--- Stories Shorter Than {MIN_WORDS} Words ---")
+print(f"Number of stories in train shorter than {MIN_WORDS} words: {len(short_stories_train)}")
+if short_stories_train:
+    print(f"Examples from train (up to 5):")
+    for s in short_stories_train[:5]:
+        print(f"  '{s}' (length: {len(_tokenize_line(s))})")
+
+print(f"Number of stories in valid shorter than {MIN_WORDS} words: {len(short_stories_valid)}")
+if short_stories_valid:
+    print(f"Examples from valid (up to 5):")
+    for s in short_stories_valid[:5]:
+        print(f"  '{s}' (length: {len(_tokenize_line(s))})")
+
 
 # %% Type-Token Ratio (Vocabulary Richness)
 total_token_count_train = sum(train_tokens.values())
