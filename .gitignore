@@ -35,6 +35,7 @@ wandb/
 **/data/**/*.bin
 **/data/**/*.csv
 **/data/**/*.zip
+**/data/**/*.parquet
 
 !data/smallstories/reasoningprompts.txt
 
