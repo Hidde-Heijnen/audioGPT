@@ -33,6 +33,8 @@ wandb/
 **/data/**/*.txt
 **/data/**/*.pkl
 **/data/**/*.bin
+**/data/**/*.csv
+**/data/**/*.zip
 
 !data/smallstories/reasoningprompts.txt
 
