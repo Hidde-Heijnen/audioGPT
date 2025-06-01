@@ -111,10 +111,12 @@ if dataset_name == 'tinystories':
     # Decoder: list of token IDs (for one sample) -> string
     # custom_tokenizer.decoder expects a 2D list/tensor of tokens.
     decode = lambda l: custom_tokenizer.decoder(torch.tensor([l], dtype=torch.long, device=device))[0]
+    
 
 else:
     # Original logic for meta.pkl or tiktoken
     load_meta = False
+    print(f"dataset_name: {dataset_name}")
     # Check for meta.pkl if not using tinystories custom tokenizer path
     if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
         # dataset_name would have been set earlier
