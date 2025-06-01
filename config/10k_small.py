@@ -1,6 +1,6 @@
-# train a medium-sized model for preprocessed stories with word-level tokenization
+# train a small-sized model for preprocessed stories with word-level tokenization
 
-out_dir = 'out/camstories_10k/medium'
+out_dir = 'out/camstories_10k/small'
 eval_interval = 100        # frequent eval to monitor overfitting
 eval_iters = 100
 log_interval = 10          # print training loss every 10 iters

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=tinystories_8M
+#SBATCH --job-name=camstories_10k_small
 #SBATCH -A MLMI-HRAH2-SL2-GPU          # ← your GPU project
 #SBATCH -p ampere
 #SBATCH --nodes=1
@@ -23,7 +23,6 @@ export TRITON_CACHE_DIR=$HOME/rds/hpc-work/audioGPT/wandb/triton_cache
 mkdir -p "$TRITON_CACHE_DIR"
 # ------------------------------------------------------------------
 
-export WANDB_PROJECT=tinystories
 export WANDB_DIR=$HOME/rds/hpc-work/audioGPT/wandb
 export WANDB_CACHE_DIR=$WANDB_DIR
 export WANDB_MODE=online
@@ -32,6 +31,6 @@ mkdir -p "$WANDB_DIR"
 echo "[$(date)] job $SLURM_JOB_ID on $(hostname) GPU:$CUDA_VISIBLE_DEVICES"
 
 cd ~/rds/hpc-work/audioGPT
-python train.py config/10k_medium.py --wandb_log=True --wandb_run_name=10k-medium-run1
+python train.py config/10k_small.py --wandb_log=True --wandb_run_name=10k-small-run1
 
 echo "[$(date)] finished" 
