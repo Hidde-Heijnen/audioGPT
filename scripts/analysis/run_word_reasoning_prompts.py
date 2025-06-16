@@ -21,7 +21,7 @@ from model import GPTConfig, GPT
 # Add tokenizers directory to path
 tokenizers_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tokenizers')
 sys.path.append(tokenizers_dir)
-from word_tokenizer import get_tokenizer
+from tokenizer import get_tokenizer
 
 # %% 
 ts_prompts = [
@@ -127,7 +127,7 @@ else:
 print("Loading word tokenizer...")
 
 # Load vocabulary directly from the existing CSV file
-from word_tokenizer import load_vocab_from_csv, get_word_level_tokenizer
+from tokenizer import load_vocab_from_csv, get_word_level_tokenizer
 
 vocab_csv_path = CONFIG['vocab_csv_path']
 print(f"Loading vocabulary from: {vocab_csv_path}")

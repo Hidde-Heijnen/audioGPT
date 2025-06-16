@@ -1,3 +1,4 @@
+# %%
 import os
 import regex as re
 import pandas as pd
@@ -13,56 +14,119 @@ from tokenizers.pre_tokenizers import Sequence as PreTokenizerSequence, Whitespa
 from tokenizers.normalizers import Sequence as NormalizerSequence, NFKC, BertNormalizer, Replace
 from tokenizers import Tokenizer
 from typing import List, Tuple, Dict
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 from transformers import AutoTokenizer
-
 import structlog
+
+
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 log = structlog.get_logger()
 
+# Define shared special tokens
+SPECIAL_TOKENS = {
+    "unk_token": "<|unknown|>",
+    "pad_token": "<|endoftext|>",
+    "eos_token": "<|endoftext|>",
+    "bos_token": "<|endoftext|>",
+}
 
 def preprocess_text(stories: List[str]) -> List[str]: # Done for new text that is not from preprocessed dataset before tokenizing
     return [contractions.fix(story) for story in stories]
 
 
-def get_regex_pattern() -> str:
-    # return r"<\|[^|]+?\|>|\p{Emoji}|\b\w+\?|\b\w+(?:'\w+)?\b|[^\s\w]" # matches word? even if no white space after it; ignore all whitespace characters (spaces, tabs, newlines, etc.)
-    return r"<\|[^|]+?\|>|\p{Emoji}|\b\w+(?:'\w+)?\b|[^\s\w]" # separates question mark and word; ignore all whitespace characters (spaces, tabs, newlines, etc.)
+def get_regex_pattern(include_possessive: bool = False) -> str:
+    """Return regex pattern for pre-tokenization.
+
+    Args:
+        include_possessive (bool): If True, the pattern will isolate the possessive
+            "'s" (and standalone trailing "'") as separate tokens. When False, the
+            possessive stays attached to the preceding word (default behaviour).
+    """
+    # Base pattern that keeps possessive 's attached
+    base_pattern = r"<\|[^|]+?\|>|\p{Emoji}|\b\w+(?:'\w+)?\b|[^\s\w]"
+
+    # Extended pattern that isolates possessive `'s` but allows other contractions.
+    # We use a negative look-ahead to prevent \b\w+'s\b being matched by the
+    # generic word pattern.
+    if include_possessive:
+        return r"<\|[^|]+?\|>|\p{Emoji}|'s\b|\b\w+(?:'(?!s\b)\w+)?\b|[^\s\w]"
+
+    return base_pattern
 
 
-def get_word_level_tokenizer(vocab: Dict[str, int]) -> PreTrainedTokenizerFast:
-    """Splits text into disctinct words and characters. It ignores whitespace."""
+# Define normalization rules in a pickle-able format
+NORMALIZATION_RULES = [
+    # (r"('s\b)", r" \1"),  # Isolate possessive 's
+    (r"(?<=\w)'(?=\s|$)", " '"),  # Isolate trailing '
+    (r"[\n\r\t\xa0\u2028\u2029]", " "),  # Standardize whitespace
+    (r"\s+", " ")  # Collapse multiple spaces
+]
 
-    log.warn("TODO: preprocessing with contraction-expansion")
-    pattern = get_regex_pattern()
+def apply_normalization_rules(text: str) -> str:
+    """Applies a list of regex rules to a string for scripts."""
+    text = text.lower()
+    for pattern, replacement in NORMALIZATION_RULES:
+        text = re.sub(pattern, replacement, text)
+    return text
 
-    tokenizer = Tokenizer(WordLevel(vocab, unk_token="<|unknown|>"))
-    tokenizer.normalizer = NormalizerSequence([
-        NFKC(),       # Unicode normalization
+
+def get_normalizer() -> NormalizerSequence:
+    """Returns the normalizer sequence for the word-level tokenizer."""
+    normalizers = [
+        NFKC(),
         BertNormalizer(
             clean_text=True,
             handle_chinese_chars=True,
             strip_accents=None,
             lowercase=True
-        ),
-        Replace(Regex(r"[\n\r\t\xa0\u2028\u2029]"), " "),
-        Replace(Regex(r"\s+"), " ")
-    ])
-    tokenizer.pre_tokenizer = PreTokenizerSequence([
-        WhitespaceSplit(), # ignore white space
+        )
+    ]
+    for pattern, replacement in NORMALIZATION_RULES:
+        normalizers.append(Replace(Regex(pattern), replacement))
+    return NormalizerSequence(normalizers)
+
+
+def get_word_level_tokenizer(vocab: Dict[str, int], include_possessive: bool = False) -> PreTrainedTokenizerFast:
+    """Create a HuggingFace *word-level* tokenizer.
+
+    If ``include_possessive`` is ``True`` the tokenizer will separate the
+    possessive token "'s" (and a trailing apostrophe) from the preceding word.
+    Otherwise the default behaviour keeps them attached.
+    """
+
+    log.warn("TODO: preprocessing with contraction-expansion")
+
+    pattern = get_regex_pattern(include_possessive=include_possessive)
+
+    tokenizer = Tokenizer(WordLevel(vocab, unk_token=SPECIAL_TOKENS["unk_token"]), eos_token=SPECIAL_TOKENS["eos_token"])
+    tokenizer.normalizer = get_normalizer()
+
+    # Build pre-tokenizer sequence. When we need possessive isolation we first
+    # split on the specific pattern `'s\b`, and then apply the generic split
+    # pattern.  This ensures we end up with exactly two tokens: the base word
+    # and the "'s" suffix (not three separate tokens).
+
+    pretokenizers = [WhitespaceSplit()]
+
+    if include_possessive:
+        pretokenizers.append(
+            Split(Regex(r"'s\b"), behavior="isolated", invert=False)
+        )
+
+    pretokenizers.append(
         Split(
-            pattern=Regex(pattern), # use regex pattern to split
-            behavior="isolated", 
-            invert=False)
-    ])
+            pattern=Regex(pattern),  # generic split
+            behavior="isolated",
+            invert=False,
+        )
+    )
+
+    tokenizer.pre_tokenizer = PreTokenizerSequence(pretokenizers)
+
     hf_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer)
-    special_tokens = {
-        "unk_token": "<|unknown|>",
-        "pad_token": "<|endoftext|>",
-        "eos_token": "<|endoftext|>",
-        "bos_token": "<|endoftext|>",
-    }
-    hf_tokenizer.add_special_tokens(special_tokens)
+    # Add shared special tokens
+    hf_tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of Word Level tokenizer: ", vocab=hf_tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=hf_tokenizer.special_tokens_map)
     return hf_tokenizer
@@ -116,15 +180,34 @@ def build_vocab_from_data(text: str, pattern: str, max_vocab_size: int) -> Tuple
     return vocab, token_counts
 
 
-def get_vocab(text: str, dataset_name: str, vocab_size: int, built_vocab: bool = True) -> Dict[str, int]:
+def get_vocab(
+    text: str,
+    dataset_name: str,
+    vocab_size: int,
+    tokenizer_name: str,
+    built_vocab: bool = True,
+    parquet_vocab: bool = True,
+) -> Dict[str, int]:
     base_dir = os.path.join(os.path.dirname(__file__), "..")
-    vocab_size_name = vocab_size
-    if vocab_size == 0:
-        vocab_size_name = "full"
-    vocab_file = os.path.join(base_dir, "word_level_tokenizer", f"{dataset_name}_{vocab_size_name}_vocab.csv")
+    vocab_size_name = vocab_size if vocab_size != 0 else "full"
+
+    # Determine if possessive splitting is required based on tokenizer variant
+    include_possessive = tokenizer_name == "word_level_pmod"
+
+    # Keep vocabularies for possessive-splitting separate to avoid collisions
+    ds_name = f"{dataset_name}_poss" if include_possessive else dataset_name
+    vocab_file = None
+    if parquet_vocab:
+        vocab_file = os.path.join(
+            base_dir, f"{ds_name}_{vocab_size_name}_vocab.parquet"
+        )
+    else:
+        vocab_file = os.path.join(
+            base_dir, "word_level_tokenizer", f"{ds_name}_{vocab_size_name}_vocab.csv"
+        )
     log.info("Getting the vocab from", path=vocab_file)
 
-    pattern = get_regex_pattern()
+    pattern = get_regex_pattern(include_possessive=include_possessive)
     log.info("Getting vocab for word-level tokenizer")
 
     if os.path.exists(vocab_file):
@@ -133,14 +216,14 @@ def get_vocab(text: str, dataset_name: str, vocab_size: int, built_vocab: bool =
     elif built_vocab:
         log.info(f"No vocab found. Creating and saving to: {vocab_file}")
         vocab, _ = build_vocab_from_data(text, pattern, vocab_size)
-        if "<|unknown|>" not in vocab:
-            vocab["<|unknown|>"] = len(vocab)
+        if SPECIAL_TOKENS["unk_token"] not in vocab:
+            vocab[SPECIAL_TOKENS["unk_token"]] = len(vocab)
         save_vocab_to_csv(vocab, vocab_file)
     else: 
         raise ValueError("No vocab found.")
     
-    if "<|unknown|>" not in vocab:
-        vocab["<|unknown|>"] = len(vocab)
+    if SPECIAL_TOKENS["unk_token"] not in vocab:
+        vocab[SPECIAL_TOKENS["unk_token"]] = len(vocab)
     return vocab 
 
 
@@ -172,7 +255,7 @@ def load_tiny_stories_gpt4_dataset() -> Tuple[List[str], List[str], pd.DataFrame
     def load_and_process(path: str) -> Tuple[List[str]]:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read()
-        stories = [s.strip() for s in text.split("<|endoftext|>") if s.strip()]
+        stories = [s.strip() for s in text.split(SPECIAL_TOKENS["eos_token"]) if s.strip()]
         return stories
 
     train_lst = load_and_process(train_path)
@@ -208,47 +291,24 @@ def download_little_stories_dataset() -> Tuple[List[str], List[str], pd.DataFram
     return train_lst, val_lst, df
 
 
-def load_preprocessed_stories(vocab_size: int = 0) -> Tuple[List[str], List[str], pd.DataFrame]:
-    preprocessed_dir = os.path.join(os.path.dirname(__file__), "preprocessed_stories")
-
-    if vocab_size == 0:
-        file_name = "preprocessed_stories_full_vocab.csv"
+def load_camstories_dataset(vocab_size: int = 0) -> Tuple[List[str], List[str], pd.DataFrame]:
+    base_dir = os.path.dirname(__file__)  # Current directory where tokenizer.py is located
+    # Load supported vocab-specific file if available
+    supported_sizes = [10000]
+    if vocab_size in supported_sizes:
+        file_name = f"camstories_{vocab_size}.parquet"
     else:
-        file_name = f"preprocessed_stories_{vocab_size}_vocab.csv"
-
-    input_path = os.path.join(preprocessed_dir, file_name)
-
-    if not os.path.exists(input_path):
-        raise ValueError(f"Preprocessed stories not found at: {input_path}")
-
-    df = pd.read_csv(input_path)
-
+        file_name = "camstories.parquet"
+    file_path = os.path.join(base_dir, "data", "camstories", file_name)
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"camstories dataset for vocab size {vocab_size} not found at: {file_path}")
+    df = pd.read_parquet(file_path)
+    # Drop origin column if present
+    if "origin" in df.columns:
+        df = df.drop(columns=["origin"])
     train_lst = df[df["split"] == "train"]["story"].tolist()
     val_lst = df[df["split"] == "val"]["story"].tolist()
-
     return train_lst, val_lst, df
-
-
-def load_camstories_10k_dataset() -> Tuple[List[str], List[str], pd.DataFrame]:
-    """Load the camstories_10k dataset from parquet file."""
-    base_dir = os.path.join(os.path.dirname(__file__), "..")
-    parquet_path = os.path.join(base_dir, "data", "camstories_10k", "camstories_10k.parquet")
-    
-    if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Missing: {parquet_path}")
-    
-    df = pd.read_parquet(parquet_path)
-    
-    # Create train/val split (80/20 split)
-    split_idx = int(len(df) * 0.8)
-    
-    train_stories = df.iloc[:split_idx]['story'].tolist()
-    val_stories = df.iloc[split_idx:]['story'].tolist()
-    
-    # Update dataframe with split information
-    df['split'] = ['train'] * split_idx + ['val'] * (len(df) - split_idx)
-    
-    return train_stories, val_stories, df
 
 
 def get_dataset(dataset_name: str, vocab_size: int) -> Tuple[List[str], List[str], pd.DataFrame]:
@@ -258,10 +318,8 @@ def get_dataset(dataset_name: str, vocab_size: int) -> Tuple[List[str], List[str
         train_lst, val_lst, df = download_simple_stories_dataset()
     elif dataset_name == "little_stories":
         train_lst, val_lst, df = download_little_stories_dataset()
-    elif dataset_name == "preprocessed_stories":
-        train_lst, val_lst, df = load_preprocessed_stories(vocab_size=vocab_size)
-    elif dataset_name == "camstories_10k":
-        train_lst, val_lst, df = load_camstories_10k_dataset()
+    elif dataset_name == "camstories":
+        train_lst, val_lst, df = load_camstories_dataset(vocab_size=vocab_size)
     elif dataset_name == "test":
         train_lst = ["hello world", "'Hi!', he said. How are you?"]
         val_lst = ["This is a test validation string"]
@@ -273,33 +331,23 @@ def get_dataset(dataset_name: str, vocab_size: int) -> Tuple[List[str], List[str
 
 def get_byte_pair_tokenizer() -> PreTrainedTokenizerFast:
     tokenizer = AutoTokenizer.from_pretrained("roneneldan/TinyStories")
-    special_tokens = {
-        "unk_token": "<|unknown|>",
-        "pad_token": "<|endoftext|>",
-        "eos_token": "<|endoftext|>",
-        "bos_token": "<|endoftext|>",
-    }
-    tokenizer.add_special_tokens(special_tokens)
+    # Add shared special tokens
+    tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of BytePair tokenizer: ", vocab=tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
     return tokenizer
 
 
 def turn_list_of_stories_into_string(train_lst: List[str], val_lst: List[str]) -> Tuple[str, str]:
-    train_str = '<|endoftext|>'.join(train_lst)
-    val_str = '<|endoftext|>'.join(val_lst)
+    train_str = SPECIAL_TOKENS["eos_token"].join(train_lst)
+    val_str = SPECIAL_TOKENS["eos_token"].join(val_lst)
     return train_str, val_str
 
 
 def get_word_piece_tokenizer() -> PreTrainedTokenizerFast:
     tokenizer = AutoTokenizer.from_pretrained("SimpleStories/SimpleStories-35M")
-    special_tokens = {
-        "unk_token": "<|unknown|>",
-        "pad_token": "<|endoftext|>",
-        "eos_token": "<|endoftext|>",
-        "bos_token": "<|endoftext|>",
-    }
-    tokenizer.add_special_tokens(special_tokens)
+    # Add shared special tokens
+    tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of SimpleStories tokenizer: ", vocab=tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
     return tokenizer
@@ -307,14 +355,17 @@ def get_word_piece_tokenizer() -> PreTrainedTokenizerFast:
 
 def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, built_vocab=True) -> PreTrainedTokenizerFast:
     if tokenizer_name == "byte_pair":
-        tokenizer = get_byte_pair_tokenizer()
+        tokenizer = get_byte_pair_tokenizer()        
 
-    elif tokenizer_name == "word_level":
+    elif tokenizer_name in ("word_level", "word_level_pmod"):
         train_lst, val_lst, _ = get_dataset(dataset_name, vocab_size)
-        train_str,  val_str = turn_list_of_stories_into_string(train_lst, val_lst)
-        stories = train_str + val_str 
-        vocab = get_vocab(stories, dataset_name, vocab_size, built_vocab=built_vocab)
-        tokenizer = get_word_level_tokenizer(vocab)
+        train_str, val_str = turn_list_of_stories_into_string(train_lst, val_lst)
+        stories = train_str + val_str
+
+        vocab = get_vocab(stories, dataset_name, vocab_size, tokenizer_name, built_vocab=built_vocab)
+
+        include_possessive = tokenizer_name == "word_level_pmod"
+        tokenizer = get_word_level_tokenizer(vocab, include_possessive=include_possessive)
 
     elif tokenizer_name == "word_piece":
         tokenizer = get_word_piece_tokenizer()
@@ -323,6 +374,3 @@ def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, b
         raise ValueError(f"Currently not supporting {tokenizer_name} tokenizer")
 
     return tokenizer
-
-
-

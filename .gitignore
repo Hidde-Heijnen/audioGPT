@@ -37,6 +37,8 @@ wandb/
 **/data/**/*.zip
 **/data/**/*.parquet
 
+.cursor
+
 !data/smallstories/reasoningprompts.txt
 
 data/cleanstories/cleaned/lines/tinystories_train_gpt4_lines.txt
