@@ -99,7 +99,7 @@ def get_word_level_tokenizer(vocab: Dict[str, int], include_possessive: bool = F
 
     pattern = get_regex_pattern(include_possessive=include_possessive)
 
-    tokenizer = Tokenizer(WordLevel(vocab, unk_token=SPECIAL_TOKENS["unk_token"]), eos_token=SPECIAL_TOKENS["eos_token"])
+    tokenizer = Tokenizer(WordLevel(vocab, unk_token=SPECIAL_TOKENS["unk_token"]))
     tokenizer.normalizer = get_normalizer()
 
     # Build pre-tokenizer sequence. When we need possessive isolation we first
@@ -353,16 +353,24 @@ def get_word_piece_tokenizer() -> PreTrainedTokenizerFast:
     return tokenizer
 
 
-def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, built_vocab=True) -> PreTrainedTokenizerFast:
+def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, built_vocab=True, parquet_vocab=True) -> PreTrainedTokenizerFast:
+    """
+    Get a tokenizer for a given dataset and vocabulary size.
+    """
+
     if tokenizer_name == "byte_pair":
         tokenizer = get_byte_pair_tokenizer()        
 
     elif tokenizer_name in ("word_level", "word_level_pmod"):
-        train_lst, val_lst, _ = get_dataset(dataset_name, vocab_size)
-        train_str, val_str = turn_list_of_stories_into_string(train_lst, val_lst)
-        stories = train_str + val_str
 
-        vocab = get_vocab(stories, dataset_name, vocab_size, tokenizer_name, built_vocab=built_vocab)
+        if not built_vocab:
+            train_lst, val_lst, _ = get_dataset(dataset_name, vocab_size)
+            train_str, val_str = turn_list_of_stories_into_string(train_lst, val_lst)
+            stories = train_str + val_str
+
+            vocab = get_vocab(stories, dataset_name, vocab_size, tokenizer_name, built_vocab=built_vocab)
+        else:
+            vocab = get_vocab_from_file(dataset_name, vocab_size, tokenizer_name, parquet_vocab=parquet_vocab)
 
         include_possessive = tokenizer_name == "word_level_pmod"
         tokenizer = get_word_level_tokenizer(vocab, include_possessive=include_possessive)
@@ -374,3 +382,69 @@ def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, b
         raise ValueError(f"Currently not supporting {tokenizer_name} tokenizer")
 
     return tokenizer
+
+def get_vocab_from_file(dataset_name: str, vocab_size: int, tokenizer_name: str, parquet_vocab: bool) -> Dict[str, int]:
+    """Load an already pre-computed vocabulary from disk.
+
+    The project ships pre-built vocabularies for the *camstories* datasets
+    (and potentially others).  These vocabularies are stored either as
+    parquet or csv files following the naming scheme
+
+        <dataset_name>_<vocab_size>{_pmod}_vocab.(parquet|csv)
+        <dataset_name>_full{_pmod}_vocab.(parquet|csv)
+
+    where the optional ``_pmod`` suffix is used for the possessive-modified
+    tokenizer variant (``word_level_pmod``).
+
+    Parameters
+    ----------
+    dataset_name: str
+        Base dataset identifier (e.g. "camstories").
+    vocab_size: int
+        Target vocabulary size.  Use ``0`` for the *full* vocabulary.
+    tokenizer_name: str
+        Either ``word_level`` or ``word_level_pmod``.  The latter triggers
+        the ``_pmod`` suffix when looking up the vocab file.
+    parquet_vocab: bool
+        If ``True`` expects a ``.parquet`` file, otherwise a ``.csv`` file.
+
+    Returns
+    -------
+    Dict[str, int]
+        Mapping from *token* -> *index* as required by
+        ``tokenizers.models.WordLevel``.
+    """
+
+    # Determine possessive splitting variant
+    include_possessive = tokenizer_name == "word_level_pmod"
+
+    # Build the expected file name
+    vocab_size_name = vocab_size if vocab_size != 0 else "full"
+    pmod_suffix = "_pmod" if include_possessive else ""
+    file_ext = "parquet" if parquet_vocab else "csv"
+
+    file_name = f"{dataset_name}_{vocab_size_name}{pmod_suffix}_vocab.{file_ext}"
+
+    # Construct full path – vocabularies are stored under data/<dataset_name>
+    base_dir = os.path.join(os.path.dirname(__file__), "data", dataset_name)
+    vocab_path = os.path.join(base_dir, file_name)
+
+    if not os.path.exists(vocab_path):
+        raise FileNotFoundError(f"Vocabulary file not found: {vocab_path}")
+
+    log.info("Loading vocabulary from existing file", path=vocab_path)
+
+    if parquet_vocab:
+        # Read only the necessary columns to keep memory usage low
+        df = pd.read_parquet(vocab_path, columns=["token", "index"])
+        vocab = {row.token: int(row.index) for row in df.itertuples(index=False)}
+    else:
+        vocab = load_vocab_from_csv(vocab_path)
+
+    # Ensure all special tokens are present – should already be in parquet files but
+    # we enforce it defensively.
+    for special_token in SPECIAL_TOKENS.values():
+        if special_token not in vocab:
+            vocab[special_token] = max(vocab.values()) + 1
+
+    return vocab

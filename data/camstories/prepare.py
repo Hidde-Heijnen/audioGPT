@@ -12,6 +12,7 @@ from tqdm import tqdm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from tokenizer import get_tokenizer
 
+
 # %%
 def parse_dataset_name(dataset_name):
     """
@@ -41,27 +42,6 @@ def parse_dataset_name(dataset_name):
             continue
     
     return vocab_size, tokenizer_type
-
-# %%
-def create_token_counts_json(vocab_df, output_path):
-    """
-    Convert vocab parquet to JSON format expected by tokenizer
-    Format: {"token_id": count, ...} sorted by frequency
-    """
-    print(f"Converting vocab to token counts JSON format...")
-    
-    # The vocab file has columns: token, index, count, story_count
-    # Sort by count (descending) to maintain frequency order
-    vocab_sorted = vocab_df.sort_values('count', ascending=False)
-    
-    # Create dictionary with index as string key and count as value
-    token_counts = {str(row['index']): row['count'] for _, row in tqdm(vocab_sorted.iterrows(), desc="Creating token counts", total=len(vocab_sorted))}
-    
-    print(f"Saving token counts to {output_path}")
-    with open(output_path, 'w') as f:
-        json.dump(token_counts, f, indent=2)
-    
-    return token_counts
 
 # %%
 def get_tokenizer_name(tokenizer_type):
@@ -158,7 +138,12 @@ def prepare_dataset(dataset_name):
     vocab_path = os.path.join(data_dir, f"{dataset_name}_vocab.parquet")
     
     # Create output directory
-    output_dir = os.path.join(data_dir, dataset_name)
+    if dataset_name.startswith("camstories_"):
+        output_subdir = dataset_name[len("camstories_"):]  # e.g. "5000" or "5000_pmod"
+    else:
+        output_subdir = dataset_name  # Fallback – should not happen for official names
+
+    output_dir = os.path.join(data_dir, output_subdir)
     os.makedirs(output_dir, exist_ok=True)
     
     # Output files
@@ -222,8 +207,17 @@ def prepare_dataset(dataset_name):
         'output_dir': output_dir
     }
 
+
+
 # %%
-# Example usage - set your dataset name here
-dataset_name = "camstories_5000"
-# Uncomment the line below to run the preparation
-# result = prepare_dataset(dataset_name) 
+def create_dataset(dataset_name):
+    result = prepare_dataset(dataset_name) 
+    print(f"Outputed meta and binary files to {result['output_dir']}")
+    print(f"Amount of train tokens: {result['train_tokens']}")
+    print(f"Amount of val tokens: {result['val_tokens']}")
+    print(f"Vocabulary size: {result['vocab_size']}")
+
+# %%
+create_dataset("camstories_5000_pmod")
+
+# %%
