@@ -35,11 +35,11 @@ def preprocess_text(stories: List[str]) -> List[str]: # Done for new text that i
     return [contractions.fix(story) for story in stories]
 
 
-def get_regex_pattern(include_possessive: bool = False) -> str:
+def get_regex_pattern(seperate_possesive: bool = False) -> str:
     """Return regex pattern for pre-tokenization.
 
     Args:
-        include_possessive (bool): If True, the pattern will isolate the possessive
+        seperate_possesive (bool): If True, the pattern will isolate the possessive
             "'s" (and standalone trailing "'") as separate tokens. When False, the
             possessive stays attached to the preceding word (default behaviour).
     """
@@ -49,7 +49,7 @@ def get_regex_pattern(include_possessive: bool = False) -> str:
     # Extended pattern that isolates possessive `'s` but allows other contractions.
     # We use a negative look-ahead to prevent \b\w+'s\b being matched by the
     # generic word pattern.
-    if include_possessive:
+    if seperate_possesive:
         return r"<\|[^|]+?\|>|\p{Emoji}|'s\b|\b\w+(?:'(?!s\b)\w+)?\b|[^\s\w]"
 
     return base_pattern
@@ -87,17 +87,17 @@ def get_normalizer() -> NormalizerSequence:
     return NormalizerSequence(normalizers)
 
 
-def get_word_level_tokenizer(vocab: Dict[str, int], include_possessive: bool = False) -> PreTrainedTokenizerFast:
+def get_word_level_tokenizer(vocab: Dict[str, int], seperate_possesive: bool = False) -> PreTrainedTokenizerFast:
     """Create a HuggingFace *word-level* tokenizer.
 
-    If ``include_possessive`` is ``True`` the tokenizer will separate the
+    If ``seperate_possesive`` is ``True`` the tokenizer will separate the
     possessive token "'s" (and a trailing apostrophe) from the preceding word.
     Otherwise the default behaviour keeps them attached.
     """
 
     log.warn("TODO: preprocessing with contraction-expansion")
 
-    pattern = get_regex_pattern(include_possessive=include_possessive)
+    pattern = get_regex_pattern(seperate_possesive=seperate_possesive)
 
     tokenizer = Tokenizer(WordLevel(vocab, unk_token=SPECIAL_TOKENS["unk_token"]))
     tokenizer.normalizer = get_normalizer()
@@ -109,7 +109,7 @@ def get_word_level_tokenizer(vocab: Dict[str, int], include_possessive: bool = F
 
     pretokenizers = [WhitespaceSplit()]
 
-    if include_possessive:
+    if seperate_possesive:
         pretokenizers.append(
             Split(Regex(r"'s\b"), behavior="isolated", invert=False)
         )
@@ -192,10 +192,10 @@ def get_vocab(
     vocab_size_name = vocab_size if vocab_size != 0 else "full"
 
     # Determine if possessive splitting is required based on tokenizer variant
-    include_possessive = tokenizer_name == "word_level_pmod"
+    seperate_possesive = tokenizer_name == "word_level_pmod"
 
     # Keep vocabularies for possessive-splitting separate to avoid collisions
-    ds_name = f"{dataset_name}_poss" if include_possessive else dataset_name
+    ds_name = f"{dataset_name}_poss" if seperate_possesive else dataset_name
     vocab_file = None
     if parquet_vocab:
         vocab_file = os.path.join(
@@ -207,7 +207,7 @@ def get_vocab(
         )
     log.info("Getting the vocab from", path=vocab_file)
 
-    pattern = get_regex_pattern(include_possessive=include_possessive)
+    pattern = get_regex_pattern(seperate_possesive=seperate_possesive)
     log.info("Getting vocab for word-level tokenizer")
 
     if os.path.exists(vocab_file):
@@ -372,8 +372,8 @@ def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, b
         else:
             vocab = get_vocab_from_file(dataset_name, vocab_size, tokenizer_name, parquet_vocab=parquet_vocab)
 
-        include_possessive = tokenizer_name == "word_level_pmod"
-        tokenizer = get_word_level_tokenizer(vocab, include_possessive=include_possessive)
+        seperate_possesive = tokenizer_name == "word_level_pmod"
+        tokenizer = get_word_level_tokenizer(vocab, seperate_possesive=seperate_possesive)
 
     elif tokenizer_name == "word_piece":
         tokenizer = get_word_piece_tokenizer()
@@ -416,11 +416,11 @@ def get_vocab_from_file(dataset_name: str, vocab_size: int, tokenizer_name: str,
     """
 
     # Determine possessive splitting variant
-    include_possessive = tokenizer_name == "word_level_pmod"
+    seperate_possesive = tokenizer_name == "word_level_pmod"
 
     # Build the expected file name
     vocab_size_name = vocab_size if vocab_size != 0 else "full"
-    pmod_suffix = "_pmod" if include_possessive else ""
+    pmod_suffix = "_pmod" if seperate_possesive else ""
     file_ext = "parquet" if parquet_vocab else "csv"
 
     file_name = f"{dataset_name}_{vocab_size_name}{pmod_suffix}_vocab.{file_ext}"
