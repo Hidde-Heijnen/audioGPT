@@ -1,6 +1,6 @@
 # %%
 """
-Run inference on reasoning prompts using a trained model and save results to CSV.
+Run inference on reasoning prompts using both small and medium trained models and save results to CSV.
 Notebook-style script for interactive execution.
 """
 
@@ -68,14 +68,17 @@ import os
 base_dir = '/home/hrah2/rds/hpc-work/audioGPT'  # Absolute path to project root
 
 CONFIG = {
-    'checkpoint_path': os.path.join(base_dir, 'out/camstories_10k/small/ckpt.pt'),
+    'small_checkpoint_path': os.path.join(base_dir, 'out/camstories_10k/small/ckpt.pt'),
+    'medium_checkpoint_path': os.path.join(base_dir, 'out/camstories_10k/medium/ckpt.pt'),
     'data_dir': os.path.join(base_dir, 'data/camstories_10k/ss_tokenized'),
-    'output_path': os.path.join(base_dir, 'results/camstories_small_reasoning.csv'),
+    'output_path': os.path.join(base_dir, 'results/camstories_small_medium_reasoning.csv'),
     'tokenizer_name': 'SimpleStories/SimpleStories-30M',
     'special_tokens_path': os.path.join(base_dir, 'scripts/utils/special_tokens_map.json'),
     'max_new_tokens': 100,
     'temperature': 0.0,
     'top_k': 200,
+    'truncate_output': False,  # Set to True to truncate outputs to 10 words with "..."
+    'truncate_words': 20,  # Number of words to truncate to if truncation is enabled
     'device': 'cuda' if torch.cuda.is_available() else 'cpu'
 }
 
@@ -138,6 +141,13 @@ def load_vocabulary_mapping(data_dir: str):
         return meta.get('stoi'), meta.get('itos'), meta.get('vocab_size')
     return None, None, None
 
+def truncate_output(text: str, max_words: int = 10) -> str:
+    """Truncate output to max_words and add ellipsis if needed."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return ' '.join(words[:max_words]) + '...'
+
 # %%
 # Setup device and precision
 # Determine the effective device and autocast manager
@@ -173,12 +183,16 @@ else: # Should not be reached
 # The variable `autocast_manager` holds the appropriate context manager for inference.
 
 # %%
-# Load model
-print(f"Loading model from {CONFIG['checkpoint_path']}...")
-model, checkpoint = load_model(CONFIG['checkpoint_path'], device) # Pass the effective device
-print(f"Model loaded successfully!")
-print(f"Model config: {model.config}")
-print(f"Vocab size: {model.config.vocab_size}")
+# Load both models
+print(f"Loading small model from {CONFIG['small_checkpoint_path']}...")
+small_model, small_checkpoint = load_model(CONFIG['small_checkpoint_path'], device)
+print(f"Small model loaded successfully!")
+print(f"Small model config: {small_model.config}")
+
+print(f"\nLoading medium model from {CONFIG['medium_checkpoint_path']}...")
+medium_model, medium_checkpoint = load_model(CONFIG['medium_checkpoint_path'], device)
+print(f"Medium model loaded successfully!")
+print(f"Medium model config: {medium_model.config}")
 
 # %%
 # Setup tokenizer
@@ -249,24 +263,31 @@ def generate_completion(
     stop_pos = next((i for i, tok in enumerate(gen_ids) if tok in special_ids), len(gen_ids))
     # truncate generated ids
     gen_ids = gen_ids[:stop_pos]
-    # trim full sequence to include only prompt + truncated generation
-    full_ids = seq_ids[:prompt_length + stop_pos]
-    full_text = decode_tokens(full_ids, tokenizer)
     # decode generated tokens
     generated_text = decode_tokens(gen_ids, tokenizer)
     # remove any occurrence of 'once upon a time' (case-insensitive) and everything after it
     generated_text = re.split(r'(?i)once upon a time', generated_text)[0].rstrip()
     
-    return full_text, generated_text
+    return generated_text
 
 # %%
-# Test with a single prompt
+# Test with a single prompt on both models
 test_prompt = "Alice was so tired when she got back home so she went"
 print(f"Testing with prompt: '{test_prompt}'")
 
 with autocast_manager:
-    full_text, generated_text = generate_completion(
-        model=model,
+    small_generated = generate_completion(
+        model=small_model,
+        prompt=test_prompt,
+        tokenizer=tokenizer,
+        device=device,
+        max_new_tokens=CONFIG['max_new_tokens'],
+        temperature=CONFIG['temperature'],
+        top_k=CONFIG['top_k']
+    )
+    
+    medium_generated = generate_completion(
+        model=medium_model,
         prompt=test_prompt,
         tokenizer=tokenizer,
         device=device,
@@ -275,8 +296,8 @@ with autocast_manager:
         top_k=CONFIG['top_k']
     )
 
-print(f"\nFull text: {full_text}")
-print(f"\nGenerated: {generated_text}")
+print(f"\nSmall model output: {truncate_output(small_generated, CONFIG['truncate_words']) if CONFIG['truncate_output'] else small_generated}")
+print(f"Medium model output: {truncate_output(medium_generated, CONFIG['truncate_words']) if CONFIG['truncate_output'] else medium_generated}")
 
 # %%
 # Prepare all prompts
@@ -296,16 +317,28 @@ for i, (prompt_set, idx, prompt) in enumerate(all_prompts[:3]):
     print(f"{i+1}. [{prompt_set}_{idx}] {prompt[:80]}...")
 
 # %%
-# Run inference on all prompts
+# Run inference on all prompts with both models
 results = []
 
-print(f"\nProcessing {len(all_prompts)} prompts...")
+print(f"\nProcessing {len(all_prompts)} prompts with both models...")
 
 with autocast_manager:
     for prompt_set, idx, prompt in tqdm(all_prompts, desc="Generating completions"):
         try:
-            full_text, generated_text = generate_completion(
-                model=model,
+            # Generate with small model
+            small_output = generate_completion(
+                model=small_model,
+                prompt=prompt,
+                tokenizer=tokenizer,
+                device=device,
+                max_new_tokens=CONFIG['max_new_tokens'],
+                temperature=CONFIG['temperature'],
+                top_k=CONFIG['top_k']
+            )
+            
+            # Generate with medium model
+            medium_output = generate_completion(
+                model=medium_model,
                 prompt=prompt,
                 tokenizer=tokenizer,
                 device=device,
@@ -315,22 +348,22 @@ with autocast_manager:
             )
             
             results.append({
+                'prompt': prompt,
+                'output_small': truncate_output(small_output, CONFIG['truncate_words']) if CONFIG['truncate_output'] else small_output,
+                'output_medium': truncate_output(medium_output, CONFIG['truncate_words']) if CONFIG['truncate_output'] else medium_output,
                 'prompt_set': prompt_set,
                 'prompt_idx': idx,
-                'prompt': prompt,
-                'generated': generated_text,
-                'full_text': full_text,
                 'timestamp': datetime.now().isoformat()
             })
             
         except Exception as e:
             print(f"\nError processing prompt {prompt_set}_{idx}: {str(e)}")
             results.append({
+                'prompt': prompt,
+                'output_small': f"ERROR: {str(e)}",
+                'output_medium': f"ERROR: {str(e)}",
                 'prompt_set': prompt_set,
                 'prompt_idx': idx,
-                'prompt': prompt,
-                'generated': f"ERROR: {str(e)}",
-                'full_text': f"ERROR: {str(e)}",
                 'timestamp': datetime.now().isoformat()
             })
 
@@ -340,25 +373,28 @@ print(f"\nCompleted processing all prompts!")
 # Save results and show summary
 df = pd.DataFrame(results)
 
+# Select only the required columns for output
+output_df = df[['prompt', 'output_small', 'output_medium']].copy()
+
 # Create output directory if it doesn't exist
 os.makedirs(os.path.dirname(CONFIG['output_path']) if os.path.dirname(CONFIG['output_path']) else '.', exist_ok=True)
 
 # Save to CSV
-df.to_csv(CONFIG['output_path'], index=False)
+output_df.to_csv(CONFIG['output_path'], index=False)
 print(f"\nResults saved to {CONFIG['output_path']}")
 
 # Print summary
 print(f"\nSummary:")
 print(f"Total prompts processed: {len(results)}")
-print(f"Successful completions: {sum(1 for r in results if not r['generated'].startswith('ERROR'))}")
-print(f"Errors: {sum(1 for r in results if r['generated'].startswith('ERROR'))}")
+print(f"Successful completions: {sum(1 for r in results if not r['output_small'].startswith('ERROR'))}")
+print(f"Errors: {sum(1 for r in results if r['output_small'].startswith('ERROR'))}")
 
 # Show some examples
 print(f"\nExample results:")
-for i, row in df.head(3).iterrows():
-    print(f"\n{i+1}. [{row['prompt_set']}_{row['prompt_idx']}]")
-    print(f"Prompt: {row['prompt']}")
-    print(f"Generated: {row['generated'][:100]}...")
+for i, row in output_df.head(3).iterrows():
+    print(f"\n{i+1}. Prompt: {row['prompt'][:80]}...")
+    print(f"   Small:  {row['output_small']}")
+    print(f"   Medium: {row['output_medium']}")
 
 # %%
 # Display results by prompt set
@@ -366,11 +402,11 @@ print("\nResults by prompt set:")
 print(df.groupby('prompt_set').size())
 
 # Show any errors
-error_count = sum(1 for r in results if r['generated'].startswith('ERROR'))
+error_count = sum(1 for r in results if r['output_small'].startswith('ERROR'))
 if error_count > 0:
     print(f"\nErrors found: {error_count}")
-    error_df = df[df['generated'].str.startswith('ERROR')]
-    print(error_df[['prompt_set', 'prompt_idx', 'generated']])
+    error_df = df[df['output_small'].str.startswith('ERROR')]
+    print(error_df[['prompt_set', 'prompt_idx', 'output_small']])
 else:
     print("\nNo errors found!")
 
