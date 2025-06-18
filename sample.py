@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+from tokenizer import get_tokenizer
 
 # Conditional import for Tokenizer
 try:
@@ -19,7 +20,7 @@ except ImportError:
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
-start = "<|startoftext|>" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+start = "<|endoftext|>" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
@@ -69,6 +70,44 @@ dataset_name = None
 if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
     dataset_name = checkpoint['config']['dataset']
 
+def parse_dataset_name(dataset_name):
+    """
+    Parse dataset name to extract vocab size and tokenizer type
+    Examples:
+    - camstories/5000 -> base_name=camstories, vocab_size=5000, tokenizer_type=None
+    - camstories/5000_pmod -> base_name=camstories, vocab_size=5000, tokenizer_type=pmod
+    """
+    if '/' in dataset_name:
+        base_name, suffix = dataset_name.split('/', 1)
+    else:
+        base_name = dataset_name
+        suffix = ""
+    
+    parts = suffix.split('_')
+    vocab_size = 0
+    tokenizer_type = None
+    
+    for i, part in enumerate(parts):
+        try:
+            vocab_size = int(part)
+            # Check if there's a tokenizer type after the vocab size
+            if i + 1 < len(parts):
+                tokenizer_type = parts[i + 1]
+            break
+        except ValueError:
+            continue
+    
+    return base_name, vocab_size, tokenizer_type
+
+def get_tokenizer_name(tokenizer_type):
+    """
+    Map tokenizer type to tokenizer name for get_tokenizer function
+    """
+    if tokenizer_type == 'pmod':
+        return 'word_level_pmod'
+    else:
+        return 'word_level'  # Default to word_level
+
 if dataset_name == 'tinystories':
     if not TINYSTORIES_TOKENIZER_AVAILABLE:
         # Provide a more informative error or fallback if TinyStoriesTokenizer is None
@@ -111,7 +150,52 @@ if dataset_name == 'tinystories':
     # Decoder: list of token IDs (for one sample) -> string
     # custom_tokenizer.decoder expects a 2D list/tensor of tokens.
     decode = lambda l: custom_tokenizer.decoder(torch.tensor([l], dtype=torch.long, device=device))[0]
+
+elif dataset_name and dataset_name.startswith('camstories'):
+    # Handle camstories datasets using the tokenizer.py get_tokenizer function
+    print(f"Using camstories tokenizer for dataset: {dataset_name}")
     
+    base_name, vocab_size, tokenizer_type = parse_dataset_name(dataset_name)
+    tokenizer_name = get_tokenizer_name(tokenizer_type)
+    
+    print(f"Base name: {base_name}, Vocab size: {vocab_size}, Tokenizer type: {tokenizer_type}, Tokenizer name: {tokenizer_name}")
+    
+    # Get the tokenizer using the same method as prepare.py
+    tokenizer = get_tokenizer(
+        tokenizer_name=tokenizer_name,
+        dataset_name=base_name,
+        vocab_size=vocab_size,
+        built_vocab=True
+    )
+    
+    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
+    
+    # Set up encode/decode functions
+    encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=True)['input_ids'][0].tolist()
+    
+    def custom_decode(token_ids):
+        """Custom decode function that handles punctuation spacing correctly"""
+        # Convert token IDs back to tokens
+        tokens = [tokenizer.decode([token_id]) for token_id in token_ids]
+        
+        # Join tokens with proper spacing
+        result = ""
+        for i, token in enumerate(tokens):
+            if i == 0:
+                result += token
+            elif token.startswith(('!', '?', '.', ',', ';', ':', "'", '"', ')', ']', '}')) or token in ['!', '?', '.', ',', ';', ':', "'", '"', ')', ']', '}']:
+                # Don't add space before punctuation
+                result += token
+            elif result.endswith(('(', '[', '{')):
+                # Don't add space after opening brackets
+                result += token
+            else:
+                # Add space before regular tokens
+                result += " " + token
+        
+        return result
+    
+    decode = custom_decode
 
 else:
     # Original logic for meta.pkl or tiktoken

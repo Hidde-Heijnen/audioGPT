@@ -114,6 +114,10 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    # --- new fields for positional encoding (back-compatible) ---
+    posenc_type: str = "learned"  # "learned" | "zeropad" | "none"
+    embed_dim_token: int = 768    # token-subvector width (used by zeropad)
+    extra_dim: int = 0            # zero padding per position (used by zeropad)
 
 class GPT(nn.Module):
 
@@ -123,23 +127,48 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
+        # --- handle derived n_embd for zeropad ---
+        if config.posenc_type == "zeropad":
+            config.n_embd = config.embed_dim_token + config.extra_dim
+        else:
+            # make sure embed_dim_token tracks n_embd for the other modes
+            config.embed_dim_token = config.n_embd
+
+        # --- token embeddings ---
+        wte = nn.Embedding(config.vocab_size, config.embed_dim_token)
+
+        # --- positional encoding ---
+        if config.posenc_type == "learned":
+            pos_emb = nn.Embedding(config.block_size, config.n_embd)
+        elif config.posenc_type in ("zeropad", "none"):
+            pos_emb = None
+        else:
+            raise ValueError(f"Invalid posenc_type: {config.posenc_type}")
+
+        # --- transformer body (aliases for backward compat) ---
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wte = wte,  # the canonical token embedding module
+            wpe = pos_emb if pos_emb is not None else nn.Embedding(1, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
-        # init all weights
+        # store references for convenience
+        self.pos_emb = pos_emb  # may be None
+
+        # disable gradients for dummy positional embedding
+        if config.posenc_type in ("zeropad", "none") and self.pos_emb is None:
+            for p in self.transformer.wpe.parameters():
+                p.requires_grad = False
+
+        # --- weight tying ---
+        self.lm_head = nn.Linear(config.embed_dim_token, config.vocab_size, bias=False)
+        self.lm_head.weight = self.transformer.wte.weight  # share weights
+        self.lm_head_weight = self.lm_head.weight  # convenience alias
+
+        # --- initialise weights ---
         self.apply(self._init_weights)
-        # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
@@ -155,8 +184,8 @@ class GPT(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+        if non_embedding and self.config.posenc_type == "learned" and self.pos_emb is not None:
+            n_params -= self.pos_emb.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -171,23 +200,33 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        # --- input embedding + positional encoding ---
+        tok_emb = self.transformer.wte(idx)  # (B, T, embed_dim_token)
+
+        if self.config.posenc_type == "learned":
+            pos = torch.arange(0, t, dtype=torch.long, device=device)
+            pos_emb = self.pos_emb(pos)  # (T, n_embd)
+            x = tok_emb + pos_emb
+        elif self.config.posenc_type == "zeropad":
+            x = self._pad_token_batch(tok_emb)
+        else:  # "none"
+            x = tok_emb
+
+        # --- transformer body ---
+        x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            h = self._extract_token_slice(x)
+            logits = F.linear(h, self.lm_head_weight)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            x_last = x[:, [-1], :]
+            h_last = self._extract_token_slice(x_last)
+            logits = F.linear(h_last, self.lm_head_weight)
             loss = None
 
         return logits, loss
@@ -198,7 +237,8 @@ class GPT(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
+        if self.config.posenc_type == "learned" and self.pos_emb is not None:
+            self.pos_emb.weight = nn.Parameter(self.pos_emb.weight[:block_size])
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
@@ -334,3 +374,42 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+    # --- helper for zeropad positional encoding ---
+    def _pad_token_batch(self, tok_emb):
+        """
+        Pads token embeddings for zeropad positional encoding.
+        tok_emb: (B, T, embed_dim_token) -> returns (B, T, n_embd) with asymmetric zeros
+        """
+        B, T, _ = tok_emb.shape
+        device = tok_emb.device
+        dtype = tok_emb.dtype
+
+        pos_ratio = torch.arange(T, device=device, dtype=dtype) / (T - 1) if T > 1 else torch.zeros(T, device=device, dtype=dtype)
+        left = (pos_ratio * self.config.extra_dim).long()  # (T,)
+        base = torch.arange(self.config.embed_dim_token, device=device)  # (embed_dim_token,)
+
+        flat_idx = (left.unsqueeze(1) + base).repeat(B, 1)  # (B*T, embed_dim_token)
+        flat_out = torch.zeros(B * T, self.config.n_embd, device=device, dtype=dtype)
+        flat_tok = tok_emb.reshape(B * T, -1)
+        flat_out.scatter_(1, flat_idx, flat_tok)
+        return flat_out.view(B, T, self.config.n_embd)
+
+    def _extract_token_slice(self, x):
+        """
+        Extract the original token slice from padded representation (no-op for learned/none).
+        x: (B, T, n_embd) -> (B, T, embed_dim_token)
+        """
+        if self.config.posenc_type != "zeropad":
+            return x
+
+        B, T, _ = x.shape
+        device = x.device
+        dtype = x.dtype
+
+        pos_ratio = torch.arange(T, device=device, dtype=dtype) / (T - 1) if T > 1 else torch.zeros(T, device=device, dtype=dtype)
+        left = (pos_ratio * self.config.extra_dim).long()  # (T,)
+        base = torch.arange(self.config.embed_dim_token, device=device)  # (embed_dim_token,)
+        idx = (left.unsqueeze(1) + base).unsqueeze(0)  # (1, T, embed_dim_token)
+        idx = idx.expand(B, -1, -1)
+        return torch.gather(x, 2, idx)
