@@ -121,16 +121,32 @@ def create_metadata(tokenizer, output_path):
     return meta
 
 # %%
-def prepare_dataset(dataset_name):
+def prepare_dataset(dataset_name, tokenizer_name=None, model_name=None):
     """
     Main function to prepare a dataset
+    
+    Args:
+        dataset_name (str): Name of the dataset (e.g., "camstories_5000", "camstories_5000_pmod")
+        tokenizer_name (str, optional): Type of tokenizer to use. If None, inferred from dataset_name.
+                                      Options: "word_level", "word_level_pmod", "byte_pair", "word_piece", "huggingface"
+        model_name (str, optional): HuggingFace model name for "huggingface" tokenizer type
     """
     print(f"Preparing dataset: {dataset_name}")
     
-    # Parse dataset name
+    # Parse dataset name for vocab size and tokenizer type (if not explicitly provided)
     vocab_size, tokenizer_type = parse_dataset_name(dataset_name)
-    tokenizer_name = get_tokenizer_name(tokenizer_type)
+    
+    # Use provided tokenizer_name or infer from dataset_name
+    if tokenizer_name is None:
+        tokenizer_name = get_tokenizer_name(tokenizer_type)
+    
     print(f"Vocab size: {vocab_size}, Tokenizer type: {tokenizer_type}, Tokenizer name: {tokenizer_name}")
+    
+    # For HuggingFace tokenizers, we don't need the vocab files
+    if tokenizer_name == "huggingface":
+        if model_name is None:
+            raise ValueError("model_name must be provided when using 'huggingface' tokenizer")
+        print(f"Using HuggingFace model: {model_name}")
     
     # Set up paths
     data_dir = os.path.dirname(os.path.abspath(__file__))
@@ -142,6 +158,14 @@ def prepare_dataset(dataset_name):
         output_subdir = dataset_name[len("camstories_"):]  # e.g. "5000" or "5000_pmod"
     else:
         output_subdir = dataset_name  # Fallback – should not happen for official names
+
+    # Append tokenizer info to output directory for non-default tokenizers
+    if tokenizer_name == "huggingface" and model_name:
+        # Clean model name for directory (replace / and : with _)
+        clean_model_name = model_name.replace("/", "_").replace(":", "_")
+        output_subdir = f"{output_subdir}_{clean_model_name}"
+    elif tokenizer_name not in ["word_level", "word_level_pmod"]:
+        output_subdir = f"{output_subdir}_{tokenizer_name}"
 
     output_dir = os.path.join(data_dir, output_subdir)
     os.makedirs(output_dir, exist_ok=True)
@@ -157,23 +181,36 @@ def prepare_dataset(dataset_name):
     print("Loading datasets...")
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
-    if not os.path.exists(vocab_path):
-        raise FileNotFoundError(f"Vocab file not found: {vocab_path}")
+    
+    # Only check for vocab file if we need it (not for HuggingFace tokenizers)
+    if tokenizer_name not in ["huggingface", "byte_pair", "word_piece"]:
+        if not os.path.exists(vocab_path):
+            raise FileNotFoundError(f"Vocab file not found: {vocab_path}")
     
     stories_df = pd.read_parquet(dataset_path)
-    vocab_df = pd.read_parquet(vocab_path)
-    
     print(f"Loaded {len(stories_df)} stories")
-    print(f"Loaded {len(vocab_df)} vocab tokens")
+    
+    if tokenizer_name not in ["huggingface", "byte_pair", "word_piece"]:
+        vocab_df = pd.read_parquet(vocab_path)
+        print(f"Loaded {len(vocab_df)} vocab tokens")
     
     # Get tokenizer using the tokenizer.py function
     print(f"Initializing tokenizer: {tokenizer_name}")
-    tokenizer = get_tokenizer(
-        tokenizer_name=tokenizer_name,
-        dataset_name="camstories", 
-        vocab_size=vocab_size,
-        built_vocab=True
-    )
+    if tokenizer_name == "huggingface":
+        tokenizer = get_tokenizer(
+            tokenizer_name=tokenizer_name,
+            dataset_name="camstories", 
+            vocab_size=vocab_size,
+            built_vocab=True,
+            model_name=model_name
+        )
+    else:
+        tokenizer = get_tokenizer(
+            tokenizer_name=tokenizer_name,
+            dataset_name="camstories", 
+            vocab_size=vocab_size,
+            built_vocab=True
+        )
     
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     
@@ -210,15 +247,45 @@ def prepare_dataset(dataset_name):
 
 
 # %%
-def create_dataset(dataset_name):
-    result = prepare_dataset(dataset_name) 
+def create_dataset(dataset_name, tokenizer_name=None, model_name=None):
+    """
+    Create dataset with specified tokenizer
+    
+    Args:
+        dataset_name (str): Name of the dataset (e.g., "camstories_5000")
+        tokenizer_name (str, optional): Type of tokenizer to use
+        model_name (str, optional): HuggingFace model name for "huggingface" tokenizer
+    """
+    result = prepare_dataset(dataset_name, tokenizer_name, model_name) 
     print(f"Outputed meta and binary files to {result['output_dir']}")
     print(f"Amount of train tokens: {result['train_tokens']}")
     print(f"Amount of val tokens: {result['val_tokens']}")
     print(f"Vocabulary size: {result['vocab_size']}")
 
+
+def create_dataset_with_huggingface_tokenizer(dataset_name, model_name):
+    """
+    Convenience function to create dataset with any HuggingFace tokenizer
+    
+    Args:
+        dataset_name (str): Name of the dataset (e.g., "camstories_5000") 
+        model_name (str): HuggingFace model name (e.g., "microsoft/DialoGPT-medium", "EleutherAI/gpt-neo-125M")
+    """
+    return create_dataset(dataset_name, tokenizer_name="huggingface", model_name=model_name)
+
+
+# Example usage:
+# create_dataset("camstories_5000_pmod")  # Use default word_level_pmod tokenizer
+# create_dataset("camstories_5000", tokenizer_name="byte_pair")  # Use byte_pair tokenizer
+# create_dataset_with_huggingface_tokenizer("camstories_5000", "EleutherAI/gpt-neo-125M")  # Use GPT-Neo tokenizer
+# create_dataset_with_huggingface_tokenizer("camstories_5000", "microsoft/DialoGPT-medium")  # Use DialoGPT tokenizer
+
 # %%
-create_dataset("camstories_5000_pmod")
+# create_dataset("camstories_10000")
+
+# %%
+# Uncomment the line below to create a dataset using GPT-Neo tokenizer
+create_dataset_with_huggingface_tokenizer("camstories_10000", "SimpleStories/SimpleStories-35M")
 
 # %%
 create_dataset("camstories_10000")

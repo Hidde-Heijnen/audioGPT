@@ -353,9 +353,57 @@ def get_word_piece_tokenizer() -> PreTrainedTokenizerFast:
     return tokenizer
 
 
-def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, built_vocab=True, parquet_vocab=True) -> PreTrainedTokenizerFast:
+def get_huggingface_tokenizer(model_name: str) -> PreTrainedTokenizerFast:
+    """Create a HuggingFace tokenizer from any model name.
+    
+    Args:
+        model_name (str): The HuggingFace model name/path to load the tokenizer from.
+    
+    Returns:
+        PreTrainedTokenizerFast: The loaded tokenizer with special tokens added.
+    """
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Add shared special tokens
+        tokenizer.add_special_tokens(SPECIAL_TOKENS)
+        log.info(f"Loaded HuggingFace tokenizer from {model_name}")
+        log.info("Original vocabulary size:", vocab=tokenizer.vocab_size)
+        log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
+        return tokenizer
+    except Exception as e:
+        log.error(f"Failed to load tokenizer from {model_name}: {e}")
+        raise
+
+
+def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, built_vocab=True, parquet_vocab=True, model_name: str = None) -> PreTrainedTokenizerFast:
     """
     Get a tokenizer for a given dataset and vocabulary size.
+    
+    Args:
+        tokenizer_name (str): Type of tokenizer to use. Options:
+            - "word_level": Custom word-level tokenizer
+            - "word_level_pmod": Custom word-level tokenizer with possessive modification
+            - "byte_pair": Byte-pair encoding tokenizer (TinyStories)
+            - "word_piece": Word-piece tokenizer (SimpleStories)
+            - "huggingface": Any HuggingFace tokenizer (requires model_name)
+        dataset_name (str): Name of the dataset
+        vocab_size (int): Vocabulary size (0 for full vocabulary)
+        built_vocab (bool): Whether to use pre-built vocabulary
+        parquet_vocab (bool): Whether to use parquet format for vocabulary
+        model_name (str, optional): HuggingFace model name when using "huggingface" tokenizer
+        
+    Returns:
+        PreTrainedTokenizerFast: The configured tokenizer
+        
+    Examples:
+        >>> # Use GPT-Neo tokenizer
+        >>> tokenizer = get_tokenizer("huggingface", "camstories", model_name="EleutherAI/gpt-neo-125M")
+        >>> 
+        >>> # Use custom word-level tokenizer
+        >>> tokenizer = get_tokenizer("word_level", "camstories", vocab_size=5000)
+        >>>
+        >>> # Use DialoGPT tokenizer
+        >>> tokenizer = get_tokenizer("huggingface", "camstories", model_name="microsoft/DialoGPT-medium")
     """
 
     if tokenizer_name == "byte_pair":
@@ -377,6 +425,11 @@ def get_tokenizer(tokenizer_name: str, dataset_name: str, vocab_size: int = 0, b
 
     elif tokenizer_name == "word_piece":
         tokenizer = get_word_piece_tokenizer()
+    
+    elif tokenizer_name == "huggingface":
+        if model_name is None:
+            raise ValueError("model_name must be provided when using 'huggingface' tokenizer")
+        tokenizer = get_huggingface_tokenizer(model_name)
     
     else: 
         raise ValueError(f"Currently not supporting {tokenizer_name} tokenizer")
