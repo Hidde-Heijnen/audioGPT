@@ -1,5 +1,5 @@
 """
-Sample from a trained model
+Custom sample script that prevents EOS tokens immediately after the prompt
 """
 import os
 import pickle
@@ -44,7 +44,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 if init_from == 'resume':
     # init from a model saved in a specific directory
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     gptconf = GPTConfig(**checkpoint['model_args'])
     model = GPT(gptconf)
     state_dict = checkpoint['model']
@@ -66,6 +66,7 @@ if compile:
 encode = None
 decode = None
 dataset_name = None
+eos_token_id = None
 
 if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
     dataset_name = checkpoint['config']['dataset']
@@ -73,9 +74,6 @@ if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint[
 def parse_dataset_name(dataset_name):
     """
     Parse dataset name to extract vocab size and tokenizer type
-    Examples:
-    - camstories/5000 -> base_name=camstories, vocab_size=5000, tokenizer_type=None
-    - camstories/5000_pmod -> base_name=camstories, vocab_size=5000, tokenizer_type=pmod
     """
     if '/' in dataset_name:
         base_name, suffix = dataset_name.split('/', 1)
@@ -108,58 +106,13 @@ def get_tokenizer_name(tokenizer_type):
     else:
         return 'word_level'  # Default to word_level
 
-if dataset_name == 'tinystories':
-    if not TINYSTORIES_TOKENIZER_AVAILABLE:
-        # Provide a more informative error or fallback if TinyStoriesTokenizer is None
-        error_msg = "TinyStories dataset specified, but 'data.tinystories.tokenizer.Tokenizer' could not be imported. "
-        error_msg += "Ensure tokenizer.py is in data/tinystories/ and the environment is set up correctly."
-        raise ImportError(error_msg)
-    
-    print("Using TinyStories custom tokenizer.")
-
-    # Define LocalTokenizerConfig, similar to what prepare.py might use internally
-    class LocalTokenizerConfig:
-        def __init__(self, name):
-            self.name = name
-
-    tokenizer_config_name = "EleutherAI/gpt-neo-125M" # Default from tinystories/prepare.py
-    top_k_val = 10000 # Default from tinystories/prepare.py
-    
-    # Construct path to token_counts.json
-    # Assumes sample.py is run from the project root directory (e.g., audioGPT/)
-    # and data/tinystories/ is a subdirectory.
-    token_counts_path = os.path.join('data', dataset_name, 'tinystories_token_counts.json')
-
-    if not os.path.exists(token_counts_path):
-        raise FileNotFoundError(
-            f"Token counts file not found for TinyStories: {token_counts_path}. "
-            f"Please ensure 'prepare.py' for the 'tinystories' dataset has been run successfully."
-        )
-
-    custom_tokenizer = TinyStoriesTokenizer(
-        config=LocalTokenizerConfig(tokenizer_config_name),
-        k=top_k_val,
-        file_path=token_counts_path,
-        device=device # Use the main script's device (e.g., 'cuda:0' or 'cpu')
-    )
-
-    # Encoder: string -> tensor of token IDs (shape (1, seq_len))
-    # The custom_tokenizer.encoder handles add_special_tokens and returns a tensor on the correct device.
-    encode = lambda s: custom_tokenizer.encoder(s, add_special_tokens=True)
-
-    # Decoder: list of token IDs (for one sample) -> string
-    # custom_tokenizer.decoder expects a 2D list/tensor of tokens.
-    decode = lambda l: custom_tokenizer.decoder(torch.tensor([l], dtype=torch.long, device=device))[0]
-
-elif dataset_name and dataset_name.startswith('camstories'):
+if dataset_name and dataset_name.startswith('camstories'):
     # Handle camstories datasets using the tokenizer.py get_tokenizer function
     print(f"Using camstories tokenizer for dataset: {dataset_name}")
     
     base_name, vocab_size, tokenizer_type = parse_dataset_name(dataset_name)
     
     # Check if this is a HuggingFace tokenizer format (e.g., SimpleStories_SimpleStories-35M)
-    # The full dataset name might be: camstories/10000_SimpleStories_SimpleStories-35M
-    # We need to reconstruct the full model name from the suffix
     if tokenizer_type and tokenizer_type.startswith('SimpleStories'):
         # Extract the full model name from the suffix
         suffix = dataset_name.split('/', 1)[1]  # Get everything after "camstories/"
@@ -202,7 +155,6 @@ elif dataset_name and dataset_name.startswith('camstories'):
         tokenizer_name = get_tokenizer_name(tokenizer_type)
         print(f"Base name: {base_name}, Vocab size: {vocab_size}, Tokenizer type: {tokenizer_type}, Tokenizer name: {tokenizer_name}")
         
-        # Get the tokenizer using the same method as prepare.py
         tokenizer = get_tokenizer(
             tokenizer_name=tokenizer_name,
             dataset_name=base_name,
@@ -212,8 +164,13 @@ elif dataset_name and dataset_name.startswith('camstories'):
     
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     
-    # Set up encode/decode functions
-    encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=True)['input_ids'][0].tolist()
+    # Get EOS token ID for filtering - use the actual [EOS] token, not <|endoftext|>
+    eos_encoding = tokenizer('[EOS]', return_tensors='pt', add_special_tokens=False)['input_ids'][0].tolist()
+    eos_token_id = eos_encoding[0] if len(eos_encoding) == 1 else None
+    print(f"EOS token ID: {eos_token_id}")
+    
+    # Set up encode/decode functions - disable special tokens for more natural continuation
+    encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=False)['input_ids'][0].tolist()
     
     def custom_decode(token_ids):
         """Custom decode function that handles punctuation spacing and subword tokens correctly"""
@@ -249,57 +206,78 @@ elif dataset_name and dataset_name.startswith('camstories'):
     decode = custom_decode
 
 else:
-    # Original logic for meta.pkl or tiktoken
-    load_meta = False
-    print(f"dataset_name: {dataset_name}")
-    # Check for meta.pkl if not using tinystories custom tokenizer path
-    if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']:
-        # dataset_name would have been set earlier
-        meta_path = os.path.join('data', dataset_name, 'meta.pkl')
-        if os.path.exists(meta_path):
-            load_meta = True
-        else:
-            print(f"Meta file not found at {meta_path} for dataset '{dataset_name}'.")
+    # Fallback for other datasets
+    print("Using fallback tokenizer setup")
+    enc = tiktoken.get_encoding("gpt2")
+    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+    decode = lambda l: enc.decode(l)
 
-    if load_meta:
-        print(f"Loading meta from {meta_path}...")
-        with open(meta_path, 'rb') as f:
-            meta = pickle.load(f)
-        # TODO want to make this more general to arbitrary encoder/decoder schemes
-        # This assumes meta['stoi'] and meta['itos'] are for character-level or simple tokenization
-        # If meta.pkl was from tinystories but this path was taken, this might be an issue.
-        # The primary `if dataset_name == 'tinystories'` block should handle it.
-        stoi, itos = meta['stoi'], meta['itos']
-        encode = lambda s: [stoi[c] for c in s] # Assumes s is iterable and c is in stoi (char-level)
-        decode = lambda l: ''.join([itos[i] for i in l])
-    else:
-        # Fallback to GPT-2 encodings if not tinystories and no meta.pkl
-        print("No meta.pkl found or not using a recognized custom tokenizer setup, assuming GPT-2 encodings...")
-        enc = tiktoken.get_encoding("gpt2")
-        encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-        decode = lambda l: enc.decode(l)
+# Custom generation function that avoids immediate EOS
+def generate_with_eos_filter(model, idx, max_new_tokens, temperature=1.0, top_k=None, eos_token_id=None):
+    """
+    Generate tokens while filtering out EOS tokens in the first few positions
+    """
+    model.eval()
+    original_length = idx.size(1)
+    
+    for i in range(max_new_tokens):
+        # if the sequence context is growing too long we must crop it at block_size
+        idx_cond = idx if idx.size(1) <= model.config.block_size else idx[:, -model.config.block_size:]
+        # forward the model to get the logits for the index in the sequence
+        logits, _ = model(idx_cond)
+        # pluck the logits at the final step
+        logits = logits[:, -1, :]
+        
+        # Filter out EOS token for the first few generated tokens
+        if eos_token_id is not None and i < 3:  # Filter EOS for first 3 generated tokens
+            logits[:, eos_token_id] = float('-inf')
+        
+        # Handle temperature=0 case (greedy decoding)
+        if temperature == 0.0:
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float('-inf')
+            # greedy decoding - select the most likely token
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            # scale by desired temperature
+            logits = logits / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float('-inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+        # append sampled index to the running sequence and continue
+        idx = torch.cat((idx, idx_next), dim=1)
+        
+        # Optional: stop if we hit EOS after the initial filtering period
+        if eos_token_id is not None and i >= 3 and idx_next.item() == eos_token_id:
+            break
+    
+    return idx
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
 
-if dataset_name == 'tinystories' and TINYSTORIES_TOKENIZER_AVAILABLE:
-    # encode() from custom_tokenizer returns a tensor (usually shape (1, T))
-    x = encode(start)
-    # Ensure x is on the correct device, though custom_tokenizer.encoder should handle it.
-    x = x.to(device)
-    if x.dim() == 1: # Should already be 2D from tokenizer, but as a safeguard
-        x = x.unsqueeze(0)
-else:
-    # Original logic: encode returns a list of ints
-    start_ids = encode(start)
-    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+# Original logic: encode returns a list of ints
+start_ids = encode(start)
+x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+print(f"Input prompt: '{start}'")
+print(f"Encoded as: {start_ids}")
 
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
-            print('---------------')
+            y = generate_with_eos_filter(model, x, max_new_tokens, temperature=temperature, top_k=top_k, eos_token_id=eos_token_id)
+            generated_text = decode(y[0].tolist())
+            print(f"Sample {k+1}:")
+            print(generated_text)
+            print('---------------') 

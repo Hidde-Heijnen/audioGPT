@@ -203,9 +203,16 @@ model.to(device)
 # freeze embedding layers if requested
 if freeze_embeddings:
     print("freezing token and position embeddings")
-    for name, param in model.named_parameters():
-        if name == 'transformer.wte.weight' or name == 'transformer.wpe.weight':
-            param.requires_grad = False
+    # explicitly freeze token + positional embeddings and (by weight tying) the lm_head
+    model.transformer.wte.weight.requires_grad = False
+    model.transformer.wpe.weight.requires_grad = False  # learned or dummy embedding
+    model.lm_head.weight.requires_grad = False  # same object as wte.weight, but keep explicit for clarity
+
+    # --- sanity checks ---
+    assert model.lm_head.weight is model.transformer.wte.weight, "lm_head weight and token embedding weight are not the same object!"
+    assert not model.transformer.wte.weight.requires_grad, "Token embeddings should be frozen when freeze_embeddings=True"
+    assert not model.lm_head.weight.requires_grad, "Output embeddings should be frozen when freeze_embeddings=True"
+    assert not model.transformer.wpe.weight.requires_grad, "Positional embeddings should be frozen when freeze_embeddings=True"
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler('cuda',enabled=(dtype == 'float16'))
