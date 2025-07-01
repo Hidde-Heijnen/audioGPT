@@ -120,6 +120,8 @@ class GPTConfig:
     posenc_type: str = "learned"  # "learned" | "zeropad" | "sinusoidal" | "none"
     embed_dim_token: int = 768    # token-subvector width (used by zeropad)
     extra_dim: int = 0            # zero padding per position (used by zeropad)
+    # Multiplicative scale for added positional encodings (learned/sinusoidal). 1.0 = standard.
+    posenc_scale: float = 1.0
 
 class GPT(nn.Module):
 
@@ -212,7 +214,7 @@ class GPT(nn.Module):
         if self.config.posenc_type in ("learned", "sinusoidal"):
             pos = torch.arange(0, t, dtype=torch.long, device=device)
             pos_emb = self.pos_emb(pos)  # (T, n_embd)
-            x = tok_emb + pos_emb
+            x = tok_emb + self.config.posenc_scale * pos_emb
         elif self.config.posenc_type == "zeropad":
             x = self._pad_token_batch(tok_emb)
         else:  # "none"
