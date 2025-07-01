@@ -115,7 +115,9 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     # --- new fields for positional encoding (back-compatible) ---
-    posenc_type: str = "learned"  # "learned" | "zeropad" | "none"
+    # Positional encoding type: "learned" (trainable), "zeropad" (asymmetric zero-padding),
+    # "sinusoidal" (fixed Transformer-style), or "none" (no position information)
+    posenc_type: str = "learned"  # "learned" | "zeropad" | "sinusoidal" | "none"
     embed_dim_token: int = 768    # token-subvector width (used by zeropad)
     extra_dim: int = 0            # zero padding per position (used by zeropad)
 
@@ -140,6 +142,9 @@ class GPT(nn.Module):
         # --- positional encoding ---
         if config.posenc_type == "learned":
             pos_emb = nn.Embedding(config.block_size, config.n_embd)
+        elif config.posenc_type == "sinusoidal":
+            # build fixed (non-trainable) sinusoidal embeddings
+            pos_emb = self._build_sinusoidal_embedding(config.block_size, config.n_embd)
         elif config.posenc_type in ("zeropad", "none"):
             pos_emb = None
         else:
@@ -204,7 +209,7 @@ class GPT(nn.Module):
         # --- input embedding + positional encoding ---
         tok_emb = self.transformer.wte(idx)  # (B, T, embed_dim_token)
 
-        if self.config.posenc_type == "learned":
+        if self.config.posenc_type in ("learned", "sinusoidal"):
             pos = torch.arange(0, t, dtype=torch.long, device=device)
             pos_emb = self.pos_emb(pos)  # (T, n_embd)
             x = tok_emb + pos_emb
@@ -237,8 +242,8 @@ class GPT(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        if self.config.posenc_type == "learned" and self.pos_emb is not None:
-            self.pos_emb.weight = nn.Parameter(self.pos_emb.weight[:block_size])
+        if self.config.posenc_type in ("learned", "sinusoidal") and self.pos_emb is not None:
+            self.pos_emb.weight = nn.Parameter(self.pos_emb.weight[:block_size], requires_grad=False)
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
@@ -413,3 +418,14 @@ class GPT(nn.Module):
         idx = (left.unsqueeze(1) + base).unsqueeze(0)  # (1, T, embed_dim_token)
         idx = idx.expand(B, -1, -1)
         return torch.gather(x, 2, idx)
+
+    @staticmethod
+    def _build_sinusoidal_embedding(max_len: int, d_model: int) -> nn.Embedding:
+        """Create sinusoidal position embeddings as in Vaswani et al. 2017."""
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        embedding = nn.Embedding.from_pretrained(pe, freeze=True)
+        return embedding
