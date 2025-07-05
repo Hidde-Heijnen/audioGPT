@@ -23,6 +23,7 @@ import pickle
 from contextlib import nullcontext
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
@@ -74,6 +75,7 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 freeze_embeddings = False # whether to freeze embedding layers
+locked_embeddings = None # column name in parquet file to use for locked embeddings (e.g. "4096_vec"), or None to disable
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
@@ -202,6 +204,92 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
+# load locked embeddings if specified
+def load_locked_embeddings(parquet_path, embed_col, meta_path):
+    """
+    Load pre-existing embeddings from parquet file and match them to the vocabulary.
+    Returns a tensor of shape (vocab_size, embed_dim) with embeddings.
+    """
+    print(f"Loading locked embeddings from {parquet_path}, column: {embed_col}")
+    
+    # Load parquet file
+    df = pd.read_parquet(parquet_path)
+    if 'token' not in df.columns or embed_col not in df.columns:
+        raise ValueError(f"Parquet file must contain 'token' and '{embed_col}' columns")
+    
+    # Load meta file to get tokenizer info
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    
+    # Get vocab mappings
+    stoi = meta['stoi']  # string to integer mapping
+    itos = meta['itos']  # integer to string mapping
+    vocab_size = len(stoi)
+    
+    # Create token to embedding mapping from parquet
+    token_to_embed = {}
+    for _, row in df.iterrows():
+        token = row['token']
+        embed = np.array(row[embed_col])
+        token_to_embed[token] = embed
+    
+    # Get embedding dimension from first embedding
+    embed_dim = len(next(iter(token_to_embed.values())))
+    print(f"Embedding dimension: {embed_dim}")
+    
+    # Create embedding matrix
+    embedding_matrix = np.zeros((vocab_size, embed_dim), dtype=np.float32)
+    missing_tokens = []
+    
+    # Fill embedding matrix
+    for token, token_id in stoi.items():
+        if token in token_to_embed:
+            embedding_matrix[token_id] = token_to_embed[token]
+        else:
+            missing_tokens.append(token)
+    
+    if missing_tokens:
+        print(f"WARNING: {len(missing_tokens)} tokens from vocabulary not found in parquet file")
+        print(f"First few missing tokens: {missing_tokens[:10]}")
+        # Initialize missing tokens with small random values
+        for token in missing_tokens:
+            token_id = stoi[token]
+            embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
+    
+    print(f"Successfully loaded embeddings for {len(token_to_embed)} tokens")
+    return torch.from_numpy(embedding_matrix)
+
+if locked_embeddings is not None:
+    parquet_path = 'data/audio_embedding/token_audio_10k.parquet'
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    
+    if meta_path is None or not os.path.exists(meta_path):
+        raise FileNotFoundError(f"Meta file not found: {meta_path}. Cannot load locked embeddings without vocabulary mapping.")
+    
+    # Load the locked embeddings
+    embedding_matrix = load_locked_embeddings(parquet_path, locked_embeddings, meta_path)
+    
+    # Check dimensions match
+    expected_embed_dim = model.config.embed_dim_token
+    if embedding_matrix.shape[1] != expected_embed_dim:
+        raise ValueError(f"Embedding dimension mismatch: expected {expected_embed_dim}, got {embedding_matrix.shape[1]}")
+    
+    if embedding_matrix.shape[0] != model.config.vocab_size:
+        raise ValueError(f"Vocab size mismatch: expected {model.config.vocab_size}, got {embedding_matrix.shape[0]}")
+    
+    # Convert to model dtype and load into model
+    embedding_matrix = embedding_matrix.to(ptdtype)
+    with torch.no_grad():
+        model.transformer.wte.weight.copy_(embedding_matrix)
+    
+    print(f"Loaded locked embeddings with shape {embedding_matrix.shape}")
+    
+    # Automatically freeze embeddings when using locked embeddings
+    freeze_embeddings = True
+    print("Automatically enabling freeze_embeddings when using locked_embeddings")
+
 model.to(device)
 
 # freeze token embedding layers if requested
