@@ -41,7 +41,7 @@ always_save_checkpoint = True # if True, always save a checkpoint after each eva
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
-wandb_project = 'owt'
+wandb_project = 'audiogpt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
@@ -52,6 +52,8 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
+# Positional-encoding defaults
+posenc_type = 'learned'  # 'learned' | 'zeropad' | 'sinusoidal' | 'none'
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 # Positional-encoding scale (multiplies positional embeddings when posenc_type is learned or sinusoidal)
 posenc_scale = 1.0
@@ -82,7 +84,7 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run? (multiple GPUs)
 if ddp:
     init_process_group(backend=backend)
     ddp_rank = int(os.environ['RANK'])
@@ -202,19 +204,31 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
-# freeze embedding layers if requested
+# freeze token embedding layers if requested
 if freeze_embeddings:
-    print("freezing token and position embeddings")
-    # explicitly freeze token + positional embeddings and (by weight tying) the lm_head
+    print("freezing token embeddings")
+    # explicitly freeze token embeddings and (by weight tying) the lm_head
     model.transformer.wte.weight.requires_grad = False
-    model.transformer.wpe.weight.requires_grad = False  # learned or dummy embedding
     model.lm_head.weight.requires_grad = False  # same object as wte.weight, but keep explicit for clarity
 
     # --- sanity checks ---
     assert model.lm_head.weight is model.transformer.wte.weight, "lm_head weight and token embedding weight are not the same object!"
     assert not model.transformer.wte.weight.requires_grad, "Token embeddings should be frozen when freeze_embeddings=True"
     assert not model.lm_head.weight.requires_grad, "Output embeddings should be frozen when freeze_embeddings=True"
-    assert not model.transformer.wpe.weight.requires_grad, "Positional embeddings should be frozen when freeze_embeddings=True"
+
+# handle positional embeddings separately based on posenc_type and posenc_scale
+if posenc_type == "learned" and posenc_scale != 0:
+    print("positional embeddings are trainable (learned posenc_type with non-zero scale)")
+    model.transformer.wpe.weight.requires_grad = True
+else:
+    print(f"freezing positional embeddings (posenc_type={posenc_type}, posenc_scale={posenc_scale})")
+    model.transformer.wpe.weight.requires_grad = False
+
+# --- sanity check for positional embeddings ---
+if posenc_type == "learned" and posenc_scale != 0:
+    assert model.transformer.wpe.weight.requires_grad, "Positional embeddings should be trainable when posenc_type=learned and posenc_scale!=0"
+else:
+    assert not model.transformer.wpe.weight.requires_grad, f"Positional embeddings should be frozen when posenc_type={posenc_type} or posenc_scale={posenc_scale}"
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler('cuda',enabled=(dtype == 'float16'))
@@ -234,6 +248,12 @@ if compile:
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+
+# get parameter count for logging
+raw_model = model.module if ddp else model # unwrap DDP container if needed
+num_params = raw_model.get_num_params()
+num_params_millions = num_params / 1e6
+print(f"model has {num_params_millions:.2f}M parameters")
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
@@ -268,13 +288,19 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    # add parameter count to config for wandb logging
+    config_with_params = config.copy()
+    config_with_params['num_params'] = num_params
+    config_with_params['num_params_millions'] = num_params_millions
+    wandb.init(project=wandb_project, name=wandb_run_name, config=config_with_params)
+    # log parameter count as a summary metric
+    wandb.log({"model/num_params": num_params, "model/num_params_millions": num_params_millions})
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
-raw_model = model.module if ddp else model # unwrap DDP container if needed
+# raw_model already defined above for parameter counting
 running_mfu = -1.0
 while True:
 

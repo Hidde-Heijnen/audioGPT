@@ -143,6 +143,7 @@ class GPT(nn.Module):
 
         # --- positional encoding ---
         if config.posenc_type == "learned":
+            # block_size is the maximum context length for the model
             pos_emb = nn.Embedding(config.block_size, config.n_embd)
         elif config.posenc_type == "sinusoidal":
             # build fixed (non-trainable) sinusoidal embeddings
