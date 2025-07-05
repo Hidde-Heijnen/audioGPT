@@ -150,6 +150,32 @@ if os.path.exists(meta_path):
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
+# check for locked embeddings early to determine embedding dimension
+if locked_embeddings is not None:
+    parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    
+    print(f"Detecting embedding dimension from {parquet_path}...")
+    df = pd.read_parquet(parquet_path)
+    if locked_embeddings not in df.columns:
+        raise ValueError(f"Column '{locked_embeddings}' not found in parquet file. Available columns: {list(df.columns)}")
+    
+    # Get embedding dimension from first embedding
+    sample_embedding = df[locked_embeddings].iloc[0]
+    detected_embed_dim = len(sample_embedding)
+    
+    print(f"Detected embedding dimension: {detected_embed_dim}")
+    print(f"Overriding n_embd from {n_embd} to {detected_embed_dim}")
+    
+    # Override global variables
+    n_embd = detected_embed_dim
+    embed_dim_token = detected_embed_dim
+    
+    # Update the config dict for wandb logging
+    globals()['n_embd'] = n_embd
+    globals()['embed_dim_token'] = embed_dim_token
+
 # model init
 # Collect model args, now including optional positional encoding knobs
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -252,18 +278,18 @@ def load_locked_embeddings(parquet_path, embed_col, meta_path):
     if missing_tokens:
         print(f"WARNING: {len(missing_tokens)} tokens from vocabulary not found in parquet file")
         print(f"First few missing tokens: {missing_tokens[:10]}")
-        # Initialize missing tokens with small random values
+        # Initialize missing tokens with zeros when using locked embeddings
         for token in missing_tokens:
             token_id = stoi[token]
-            embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
+            embedding_matrix[token_id] = np.zeros(embed_dim, dtype=np.float32)
+            # embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
+        print(f"Initialized {len(missing_tokens)} missing tokens with zeros")
     
     print(f"Successfully loaded embeddings for {len(token_to_embed)} tokens")
     return torch.from_numpy(embedding_matrix)
 
 if locked_embeddings is not None:
-    parquet_path = 'data/audio_embedding/token_audio_10k.parquet'
-    if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
     
     if meta_path is None or not os.path.exists(meta_path):
         raise FileNotFoundError(f"Meta file not found: {meta_path}. Cannot load locked embeddings without vocabulary mapping.")
@@ -271,7 +297,7 @@ if locked_embeddings is not None:
     # Load the locked embeddings
     embedding_matrix = load_locked_embeddings(parquet_path, locked_embeddings, meta_path)
     
-    # Check dimensions match
+    # Sanity check - dimensions should match since we set them earlier
     expected_embed_dim = model.config.embed_dim_token
     if embedding_matrix.shape[1] != expected_embed_dim:
         raise ValueError(f"Embedding dimension mismatch: expected {expected_embed_dim}, got {embedding_matrix.shape[1]}")
