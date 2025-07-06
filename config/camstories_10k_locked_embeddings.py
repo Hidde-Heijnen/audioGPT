@@ -2,7 +2,7 @@
 
 out_dir = 'out/camstories_10k_locked_embeddings'
 eval_interval = 500        # regular eval interval after 1000 iterations
-early_eval_interval = 150  # eval interval for first 1000 iterations
+early_eval_interval = 100  # eval interval for first 1000 iterations
 eval_iters = 100
 log_interval = 10          # print training loss every 10 iters
 
