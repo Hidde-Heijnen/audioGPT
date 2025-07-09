@@ -16,6 +16,7 @@ from tokenizers import Tokenizer
 from typing import List, Tuple, Dict
 from transformers import AutoTokenizer
 import structlog
+import torch
 
 
 # os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -30,6 +31,74 @@ SPECIAL_TOKENS = {
     "eos_token": "<|endoftext|>",
     "bos_token": "<|endoftext|>",
 }
+
+
+class ConsistentTokenizerWrapper(PreTrainedTokenizerFast):
+    """
+    Wrapper that ensures all tokenizers consistently add both BOS and EOS tokens
+    when add_special_tokens=True, regardless of the underlying tokenizer implementation.
+    """
+    
+    def __init__(self, base_tokenizer):
+        # Don't call super().__init__() to avoid conflicts
+        self.__dict__.update(base_tokenizer.__dict__)
+        self._base_tokenizer = base_tokenizer
+    
+    def __call__(self, text, add_special_tokens=False, return_tensors=None, padding=False, 
+                 truncation=False, max_length=None, **kwargs):
+        """Override __call__ to ensure consistent BOS/EOS token addition."""
+        
+        if add_special_tokens:
+            # First tokenize without special tokens
+            result = self._base_tokenizer(
+                text, 
+                add_special_tokens=False, 
+                return_tensors=return_tensors,
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+                **kwargs
+            )
+            
+            # Manually add BOS and EOS tokens
+            input_ids = result['input_ids']
+            
+            if return_tensors == 'pt':
+                # Handle torch tensor case
+                bos_id = torch.tensor([self.bos_token_id], dtype=input_ids.dtype, device=input_ids.device)
+                eos_id = torch.tensor([self.eos_token_id], dtype=input_ids.dtype, device=input_ids.device)
+                
+                # Add BOS at beginning and EOS at end
+                input_ids = torch.cat([bos_id, input_ids.squeeze(0), eos_id]).unsqueeze(0)
+                result['input_ids'] = input_ids
+            else:
+                # Handle list case
+                if isinstance(input_ids[0], list):
+                    # Batch case
+                    for i in range(len(input_ids)):
+                        input_ids[i] = [self.bos_token_id] + input_ids[i] + [self.eos_token_id]
+                else:
+                    # Single sequence case
+                    input_ids = [self.bos_token_id] + input_ids + [self.eos_token_id]
+                result['input_ids'] = input_ids
+                
+            return result
+        else:
+            # Use base tokenizer as-is when not adding special tokens
+            return self._base_tokenizer(
+                text, 
+                add_special_tokens=False, 
+                return_tensors=return_tensors,
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+                **kwargs
+            )
+    
+    def __getattr__(self, name):
+        """Delegate attribute access to the base tokenizer."""
+        return getattr(self._base_tokenizer, name)
+
 
 def preprocess_text(stories: List[str]) -> List[str]: # Done for new text that is not from preprocessed dataset before tokenizing
     return [contractions.fix(story) for story in stories]
@@ -129,7 +198,9 @@ def get_word_level_tokenizer(vocab: Dict[str, int], seperate_possesive: bool = F
     hf_tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of Word Level tokenizer: ", vocab=hf_tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=hf_tokenizer.special_tokens_map)
-    return hf_tokenizer
+    
+    # Wrap with consistent behavior
+    return ConsistentTokenizerWrapper(hf_tokenizer)
 
 
 def save_vocab_to_csv(vocab: dict, filepath: str):
@@ -335,7 +406,9 @@ def get_byte_pair_tokenizer() -> PreTrainedTokenizerFast:
     tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of BytePair tokenizer: ", vocab=tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
-    return tokenizer
+    
+    # Wrap with consistent behavior
+    return ConsistentTokenizerWrapper(tokenizer)
 
 
 def turn_list_of_stories_into_string(train_lst: List[str], val_lst: List[str]) -> Tuple[str, str]:
@@ -350,7 +423,9 @@ def get_word_piece_tokenizer() -> PreTrainedTokenizerFast:
     tokenizer.add_special_tokens(SPECIAL_TOKENS)
     log.info("Original vocabulary size of SimpleStories tokenizer: ", vocab=tokenizer.vocab_size)
     log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
-    return tokenizer
+    
+    # Wrap with consistent behavior
+    return ConsistentTokenizerWrapper(tokenizer)
 
 
 def get_huggingface_tokenizer(model_name: str) -> PreTrainedTokenizerFast:
@@ -369,7 +444,9 @@ def get_huggingface_tokenizer(model_name: str) -> PreTrainedTokenizerFast:
         log.info(f"Loaded HuggingFace tokenizer from {model_name}")
         log.info("Original vocabulary size:", vocab=tokenizer.vocab_size)
         log.info("Special tokens map:", special_tokens_map=tokenizer.special_tokens_map)
-        return tokenizer
+        
+        # Wrap with consistent behavior
+        return ConsistentTokenizerWrapper(tokenizer)
     except Exception as e:
         log.error(f"Failed to load tokenizer from {model_name}: {e}")
         raise
