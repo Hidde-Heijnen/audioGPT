@@ -281,10 +281,10 @@ def create_dataset_with_huggingface_tokenizer(dataset_name, model_name):
 # create_dataset_with_huggingface_tokenizer("camstories_5000", "microsoft/DialoGPT-medium")  # Use DialoGPT tokenizer
 
 # %%
-# create_dataset("camstories_10000")
+create_dataset("camstories_10000")
 
 # %%
 # Uncomment the line below to create a dataset using GPT-Neo tokenizer
-create_dataset_with_huggingface_tokenizer("camstories_10000", "SimpleStories/SimpleStories-35M")
+# create_dataset_with_huggingface_tokenizer("camstories_10000", "SimpleStories/SimpleStories-35M")
 
 # %%
