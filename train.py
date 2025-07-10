@@ -101,6 +101,8 @@ if ddp:
     # down the desired gradient accumulation iterations per process proportionally
     assert gradient_accumulation_steps % ddp_world_size == 0
     gradient_accumulation_steps //= ddp_world_size
+    # Update config for wandb logging
+    config['gradient_accumulation_steps'] = gradient_accumulation_steps
 else:
     # if not ddp, we are running on a single gpu, and one process
     master_process = True
@@ -176,6 +178,10 @@ if locked_embeddings is not None:
     # Update the config dict for wandb logging
     globals()['n_embd'] = n_embd
     globals()['embed_dim_token'] = embed_dim_token
+    
+    # Update the config dict so wandb shows correct values
+    config['n_embd'] = n_embd
+    config['embed_dim_token'] = embed_dim_token
 
 # model init
 # Collect model args, now including optional positional encoding knobs
@@ -206,6 +212,9 @@ elif init_from == 'resume':
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale']:
         model_args[k] = checkpoint_model_args[k]
+        # Update config for wandb logging if key exists in config
+        if k in config:
+            config[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
@@ -227,10 +236,15 @@ elif init_from.startswith('gpt2'):
     # read off the created config params, so we can store them into checkpoint correctly
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale']:
         model_args[k] = getattr(model.config, k)
+        # Update config for wandb logging if key exists in config
+        if k in config:
+            config[k] = getattr(model.config, k)
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
+    # Update config for wandb logging
+    config['block_size'] = block_size
 
 # load locked embeddings if specified
 def load_locked_embeddings(parquet_path, embed_col, meta_path):
@@ -316,6 +330,8 @@ if locked_embeddings is not None:
     # Automatically freeze embeddings when using locked embeddings
     freeze_embeddings = True
     print("Automatically enabling freeze_embeddings when using locked_embeddings")
+    # Update config for wandb logging
+    config['freeze_embeddings'] = freeze_embeddings
 
 model.to(device)
 

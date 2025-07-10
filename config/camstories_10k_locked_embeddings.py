@@ -1,6 +1,6 @@
 # train a model with locked 4096-dimensional embeddings from parquet file
 
-out_dir = 'out/camstories_10k_locked_embeddings'
+out_dir = 'out/camstories_10k_locked_embeddings_paulina'
 eval_interval = 500        # regular eval interval after 1000 iterations
 early_eval_interval = 100  # eval interval for first 1000 iterations
 eval_iters = 100
@@ -11,7 +11,7 @@ wandb_log = False                # set True via CLI if needed
 wandb_project = 'audiogpt'
 
 dataset = 'camstories/10000'  # use the normal camstories dataset
-gradient_accumulation_steps = 1  # Default value
+gradient_accumulation_steps = 10
 batch_size = 64
 
 # --- Locked Embeddings ---
@@ -23,8 +23,8 @@ freeze_embeddings = True        # will be automatically set, but explicit here
 posenc_type = "none"
 
 # model: n_embd will be automatically set to 4096 from parquet file
-n_layer = 8
-n_head = 16  # 4096 must be divisible by n_head, so using 16 instead of 12
+n_layer = 6
+n_head = 8  # 4096 must be divisible by n_head, so using 16 instead of 12
 # n_embd will be automatically detected as 4096 from parquet file
 dropout = 0.0
 bias = False
@@ -37,9 +37,10 @@ beta1 = 0.9
 beta2 = 0.95
 weight_decay = 0.1
 grad_clip = 1.0
-block_size = 512
+# block_size = 512
+block_size = 256
 
-warmup_iters = 500
+warmup_iters = 1000
 lr_decay_iters = 5000  # match max_iters
 
 # device and compilation settings
