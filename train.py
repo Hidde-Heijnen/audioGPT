@@ -36,7 +36,7 @@ from model import GPTConfig, GPT
 out_dir = 'out'
 eval_interval = 2000
 early_eval_interval = 100  # evaluation interval for first 1000 iterations
-log_interval = 1
+log_interval = 10
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -485,11 +485,20 @@ while True:
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
+        if torch.isnan(loss).any() or torch.isinf(loss).any():  # Lightweight check, gated if needed
+            if iter_num > 1000:  # Only check after warmup to focus on your delayed NaN
+                raise ValueError(f"NaN/Inf detected in loss at iter {iter_num} before backward")
         scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # clip the gradient
+        grad_norm = None  # Initialize for logging
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=grad_clip,
+                norm_type=2.0,
+                error_if_nonfinite=True  # Raises RuntimeError on NaN/Inf grads
+            )
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
@@ -507,7 +516,25 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        grad_str = f", grad norm {grad_norm:.4f}" if grad_norm is not None else ""
+        print(f"iter {iter_num}: loss {lossf:.4f}{grad_str}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+
+        if wandb_log:
+            log_dict = {
+                "iter": iter_num,
+                "train/loss": lossf,
+                "mfu": running_mfu*100,
+            }
+            if grad_norm is not None:
+                grad_norm_item = grad_norm.item()
+                log_dict["train/grad_norm"] = grad_norm_item
+                if grad_norm_item > 10.0 and iter_num > 200:  # Arbitrary threshold; tune based on runs (e.g., if norms spike before NaN)
+                    wandb.alert(
+                        title="High Gradient Norm Detected",
+                        text=f"Grad norm {grad_norm_item:.4f} at iter {iter_num} – potential instability in audio mixing.",
+                        level=wandb.AlertLevel.WARN
+                    )
+            wandb.log(log_dict)
     iter_num += 1
     local_iter_num += 1
 
