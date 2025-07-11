@@ -293,12 +293,12 @@ def load_locked_embeddings(parquet_path, embed_col, meta_path):
     if missing_tokens:
         print(f"WARNING: {len(missing_tokens)} tokens from vocabulary not found in parquet file")
         print(f"First few missing tokens: {missing_tokens[:10]}")
-        # Initialize missing tokens with zeros when using locked embeddings
+        # Initialize missing tokens with Gaussian noise when using locked embeddings
         for token in missing_tokens:
             token_id = stoi[token]
-            embedding_matrix[token_id] = np.zeros(embed_dim, dtype=np.float32)
-            # embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
-        print(f"Initialized {len(missing_tokens)} missing tokens with zeros")
+            # embedding_matrix[token_id] = np.zeros(embed_dim, dtype=np.float32)
+            embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
+        print(f"Initialized {len(missing_tokens)} missing tokens with Gaussian noise")
     
     print(f"Successfully loaded embeddings for {len(token_to_embed)} tokens")
     return torch.from_numpy(embedding_matrix)
