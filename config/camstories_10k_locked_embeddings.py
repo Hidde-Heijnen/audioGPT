@@ -11,7 +11,7 @@ wandb_log = False                # set True via CLI if needed
 wandb_project = 'audiogpt'
 
 dataset = 'camstories/10000'  # use the normal camstories dataset
-gradient_accumulation_steps = 4
+gradient_accumulation_steps = 5
 batch_size = 64
 
 # --- Locked Embeddings ---
@@ -29,11 +29,11 @@ n_head = 8  # 4096 must be divisible by n_head, so using 16 instead of 12
 dropout = 0.0
 bias = False
 
-learning_rate = 5e-4
+learning_rate = 6e-4
 max_iters = 5000    # extended training
 decay_lr = True
 min_lr = 6e-5
-beta1 = 0.999
+beta1 = 0.90
 beta2 = 0.95
 weight_decay = 0.1
 grad_clip = 1.0

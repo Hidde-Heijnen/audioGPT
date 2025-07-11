@@ -528,12 +528,12 @@ while True:
             if grad_norm is not None:
                 grad_norm_item = grad_norm.item()
                 log_dict["train/grad_norm"] = grad_norm_item
-                if grad_norm_item > 10.0 and iter_num > 200:  # Arbitrary threshold; tune based on runs (e.g., if norms spike before NaN)
-                    wandb.alert(
-                        title="High Gradient Norm Detected",
-                        text=f"Grad norm {grad_norm_item:.4f} at iter {iter_num} – potential instability in audio mixing.",
-                        level=wandb.AlertLevel.WARN
-                    )
+                # if grad_norm_item > 20.0 and iter_num > 200:  # Arbitrary threshold; tune based on runs (e.g., if norms spike before NaN)
+                #     wandb.alert(
+                #         title="High Gradient Norm Detected",
+                #         text=f"Grad norm {grad_norm_item:.4f} at iter {iter_num} – potential instability in audio mixing.",
+                #         level=wandb.AlertLevel.WARN
+                #     )
             wandb.log(log_dict)
     iter_num += 1
     local_iter_num += 1
