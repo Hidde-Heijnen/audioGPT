@@ -77,6 +77,8 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 freeze_embeddings = False # whether to freeze embedding layers
 locked_embeddings = None # column name in parquet file to use for locked embeddings (e.g. "4096_vec"), or None to disable
+audio_dim = 0  # dimension for audio channel, 0 to disable
+audio_locked = None  # column name for locked audio embeddings, None to disable
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
@@ -154,16 +156,22 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # check for locked embeddings early to determine embedding dimension
-if locked_embeddings is not None:
-    parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
+parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
+df = None  # Initialize dataframe variable
+
+# Load parquet file once if either locked_embeddings or audio_locked is specified
+if locked_embeddings is not None or audio_locked is not None:
     if not os.path.exists(parquet_path):
         raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
     
-    print(f"Detecting embedding dimension from {parquet_path}...")
+    print(f"Loading parquet file from {parquet_path}...")
     df = pd.read_parquet(parquet_path)
+
+if locked_embeddings is not None:
     if locked_embeddings not in df.columns:
         raise ValueError(f"Column '{locked_embeddings}' not found in parquet file. Available columns: {list(df.columns)}")
     
+    print(f"Detecting embedding dimension from column '{locked_embeddings}'...")
     # Get embedding dimension from first embedding
     sample_embedding = df[locked_embeddings].iloc[0]
     detected_embed_dim = len(sample_embedding)
@@ -183,6 +191,25 @@ if locked_embeddings is not None:
     config['n_embd'] = n_embd
     config['embed_dim_token'] = embed_dim_token
 
+# check for audio locked embeddings
+if audio_locked is not None:
+    if audio_locked not in df.columns:
+        raise ValueError(f"Column '{audio_locked}' not found in parquet file. Available columns: {list(df.columns)}")
+    
+    print(f"Detecting audio embedding dimension from column '{audio_locked}'...")
+    # Get embedding dimension from first embedding
+    sample_embedding = df[audio_locked].iloc[0]
+    detected_audio_dim = len(sample_embedding)
+    
+    print(f"Detected audio embedding dimension: {detected_audio_dim}")
+    if audio_dim == 0:
+        print(f"Setting audio_dim to {detected_audio_dim}")
+        audio_dim = detected_audio_dim
+        globals()['audio_dim'] = audio_dim
+        config['audio_dim'] = audio_dim
+    elif audio_dim != detected_audio_dim:
+        raise ValueError(f"Specified audio_dim {audio_dim} does not match detected {detected_audio_dim}")
+
 # model init
 # Collect model args, now including optional positional encoding knobs
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -192,6 +219,9 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
 for _k in ("posenc_type", "embed_dim_token", "extra_dim", "posenc_scale"):
     if _k in globals():
         model_args[_k] = globals()[_k]
+
+# Audio options
+model_args['audio_dim'] = audio_dim
 
 if init_from == 'scratch':
     # init a new model from scratch
@@ -210,7 +240,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim']:
         model_args[k] = checkpoint_model_args[k]
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -234,7 +264,7 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim']:
         model_args[k] = getattr(model.config, k)
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -247,15 +277,23 @@ if block_size < model.config.block_size:
     config['block_size'] = block_size
 
 # load locked embeddings if specified
-def load_locked_embeddings(parquet_path, embed_col, meta_path):
+def load_locked_embeddings(parquet_path, embed_col, meta_path, df=None):
     """
     Load pre-existing embeddings from parquet file and match them to the vocabulary.
     Returns a tensor of shape (vocab_size, embed_dim) with embeddings.
+    
+    Args:
+        parquet_path: Path to the parquet file (used for logging or fallback reading)
+        embed_col: Column name containing embeddings
+        meta_path: Path to the meta.pkl file with vocabulary info
+        df: Optional pre-loaded dataframe. If None, will read parquet_path.
     """
     print(f"Loading locked embeddings from {parquet_path}, column: {embed_col}")
     
-    # Load parquet file
-    df = pd.read_parquet(parquet_path)
+    # Load parquet file if not provided
+    if df is None:
+        df = pd.read_parquet(parquet_path)
+    
     if 'token' not in df.columns or embed_col not in df.columns:
         raise ValueError(f"Parquet file must contain 'token' and '{embed_col}' columns")
     
@@ -304,13 +342,12 @@ def load_locked_embeddings(parquet_path, embed_col, meta_path):
     return torch.from_numpy(embedding_matrix)
 
 if locked_embeddings is not None:
-    parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
     
     if meta_path is None or not os.path.exists(meta_path):
         raise FileNotFoundError(f"Meta file not found: {meta_path}. Cannot load locked embeddings without vocabulary mapping.")
     
     # Load the locked embeddings
-    embedding_matrix = load_locked_embeddings(parquet_path, locked_embeddings, meta_path)
+    embedding_matrix = load_locked_embeddings(parquet_path, locked_embeddings, meta_path, df)
     
     # Sanity check - dimensions should match since we set them earlier
     expected_embed_dim = model.config.embed_dim_token
@@ -333,6 +370,32 @@ if locked_embeddings is not None:
     # Update config for wandb logging
     config['freeze_embeddings'] = freeze_embeddings
 
+if audio_dim > 0 and audio_locked is not None:
+    if meta_path is None or not os.path.exists(meta_path):
+        raise FileNotFoundError(f"Meta file not found: {meta_path}. Cannot load locked audio embeddings without vocabulary mapping.")
+    
+    # Load the locked audio embeddings
+    embedding_matrix = load_locked_embeddings(parquet_path, audio_locked, meta_path, df)
+    
+    # Sanity check
+    if embedding_matrix.shape[1] != model.config.audio_dim:
+        raise ValueError(f"Audio embedding dimension mismatch: expected {model.config.audio_dim}, got {embedding_matrix.shape[1]}")
+    
+    if embedding_matrix.shape[0] != model.config.vocab_size:
+        raise ValueError(f"Vocab size mismatch: expected {model.config.vocab_size}, got {embedding_matrix.shape[0]}")
+    
+    # Convert to model dtype and load into model
+    embedding_matrix = embedding_matrix.to(ptdtype)
+    with torch.no_grad():
+        model.transformer.w_audio.weight.copy_(embedding_matrix)
+    
+    print(f"Loaded locked audio embeddings with shape {embedding_matrix.shape}")
+    
+    # Automatically freeze audio embeddings
+    freeze_embeddings = True
+    print("Automatically enabling freeze_embeddings for audio when using audio_locked")
+    config['freeze_embeddings'] = freeze_embeddings
+
 model.to(device)
 
 # freeze token embedding layers if requested
@@ -346,6 +409,11 @@ if freeze_embeddings:
     assert model.lm_head.weight is model.transformer.wte.weight, "lm_head weight and token embedding weight are not the same object!"
     assert not model.transformer.wte.weight.requires_grad, "Token embeddings should be frozen when freeze_embeddings=True"
     assert not model.lm_head.weight.requires_grad, "Output embeddings should be frozen when freeze_embeddings=True"
+
+    # freeze audio if present
+    if hasattr(model.transformer, 'w_audio'):
+        model.transformer.w_audio.weight.requires_grad = False
+        assert not model.transformer.w_audio.weight.requires_grad, "Audio embeddings should be frozen when freeze_embeddings=True"
 
 # handle positional embeddings separately based on posenc_type and posenc_scale
 if posenc_type == "learned" and posenc_scale != 0:
@@ -528,12 +596,6 @@ while True:
             if grad_norm is not None:
                 grad_norm_item = grad_norm.item()
                 log_dict["train/grad_norm"] = grad_norm_item
-                # if grad_norm_item > 20.0 and iter_num > 200:  # Arbitrary threshold; tune based on runs (e.g., if norms spike before NaN)
-                #     wandb.alert(
-                #         title="High Gradient Norm Detected",
-                #         text=f"Grad norm {grad_norm_item:.4f} at iter {iter_num} – potential instability in audio mixing.",
-                #         level=wandb.AlertLevel.WARN
-                #     )
             wandb.log(log_dict)
     iter_num += 1
     local_iter_num += 1

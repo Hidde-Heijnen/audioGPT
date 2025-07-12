@@ -48,8 +48,12 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+        if config.audio_dim > 0:
+            self.forward = self._forward_with_audio
+        else:
+            self.forward = self._forward_without_audio
 
-    def forward(self, x):
+    def _forward_without_audio(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -75,6 +79,35 @@ class CausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
+    def _forward_with_audio(self, x, audio_norm):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+
+        # Always use manual attention implementation for audio case since we need attention weights
+        # for audio mixing. Flash attention doesn't expose attention weights, so we can't use it.
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att_drop = self.attn_dropout(att)
+        y = att_drop @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        # audio mixing using the same attention weights
+        audio_norm = audio_norm.unsqueeze(1)  # (B, 1, T, Da)
+        audio_mixed = torch.matmul(att_drop, audio_norm)  # (B, nh, T, T) @ (B, 1, T, Da) -> (B, nh, T, Da)
+        audio_mixed = audio_mixed.mean(dim=1)  # average over heads (B, T, Da)
+
+        # output projection for y
+        y = self.resid_dropout(self.c_proj(y))
+
+        return y, audio_mixed
+
 class MLP(nn.Module):
 
     def __init__(self, config):
@@ -99,11 +132,25 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        if config.audio_dim > 0:
+            self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
+            self.forward = self._forward_with_audio
+        else:
+            self.forward = self._forward_without_audio
 
-    def forward(self, x):
+    def _forward_without_audio(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
+    def _forward_with_audio(self, x, audio):
+        x_norm = self.ln_1(x)
+        audio_norm = self.audio_ln1(audio)
+        y, audio_mixed = self.attn(x_norm, audio_norm)
+        x = x + y
+        audio = audio + audio_mixed
+        x = x + self.mlp(self.ln_2(x))
+        return x, audio
 
 @dataclass
 class GPTConfig:
@@ -122,6 +169,8 @@ class GPTConfig:
     extra_dim: int = 0            # zero padding per position (used by zeropad)
     # Multiplicative scale for added positional encodings (learned/sinusoidal). 1.0 = standard.
     posenc_scale: float = 1.0
+    # --- new fields for audio channel ---
+    audio_dim: int = 0  # if >0, enable audio shadow channel with this dimension
 
 class GPT(nn.Module):
 
@@ -170,6 +219,13 @@ class GPT(nn.Module):
             for p in self.transformer.wpe.parameters():
                 p.requires_grad = False
 
+        if config.audio_dim > 0:
+            self.transformer.w_audio = nn.Embedding(config.vocab_size, config.audio_dim)
+            self.audio_ln_f = LayerNorm(config.audio_dim, bias=config.bias)
+            self.forward = self._forward_with_audio
+        else:
+            self.forward = self._forward_without_audio
+
         # --- weight tying ---
         self.lm_head = nn.Linear(config.embed_dim_token, config.vocab_size, bias=False)
         self.lm_head.weight = self.transformer.wte.weight  # share weights
@@ -204,7 +260,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def _forward_without_audio(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -226,6 +282,47 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+
+        if targets is not None:
+            h = self._extract_token_slice(x)
+            logits = F.linear(h, self.lm_head_weight)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            x_last = x[:, [-1], :]
+            h_last = self._extract_token_slice(x_last)
+            logits = F.linear(h_last, self.lm_head_weight)
+            loss = None
+
+        return logits, loss
+
+    def _forward_with_audio(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # --- input embedding + positional encoding ---
+        tok_emb = self.transformer.wte(idx)  # (B, T, embed_dim_token)
+        audio_emb = self.transformer.w_audio(idx)  # (B, T, audio_dim)
+
+        if self.config.posenc_type in ("learned", "sinusoidal"):
+            pos = torch.arange(0, t, dtype=torch.long, device=device)
+            pos_emb = self.pos_emb(pos)  # (T, n_embd)
+            x = tok_emb + self.config.posenc_scale * pos_emb
+            audio = audio_emb  # no positional encoding for audio
+        elif self.config.posenc_type == "zeropad":
+            x = self._pad_token_batch(tok_emb)
+            audio = audio_emb  # no zeropad for audio in simple case
+        else:  # "none"
+            x = tok_emb
+            audio = audio_emb
+
+        # --- transformer body ---
+        x = self.transformer.drop(x)
+        # no dropout for audio
+        for block in self.transformer.h:
+            x, audio = block(x, audio)
+        x = self.transformer.ln_f(x)
+        audio = self.audio_ln_f(audio)  # apply final norm to audio
 
         if targets is not None:
             h = self._extract_token_slice(x)
