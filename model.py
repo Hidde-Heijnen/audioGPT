@@ -48,7 +48,7 @@ class CausalSelfAttention(nn.Module):
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
-        if config.audio_dim > 0:
+        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
             self.forward = self._forward_with_audio
         else:
             self.forward = self._forward_without_audio
@@ -132,7 +132,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
-        if config.audio_dim > 0:
+        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        if enable_audio:
             self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
             self.forward = self._forward_with_audio
         else:
@@ -171,6 +172,7 @@ class GPTConfig:
     posenc_scale: float = 1.0
     # --- new fields for audio channel ---
     audio_dim: int = 0  # if >0, enable audio shadow channel with this dimension
+    transformer_type: str = 'normal_transformer'  # 'normal_transformer' | 'shadow_audio'
 
 class GPT(nn.Module):
 
@@ -179,6 +181,9 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+
+        if config.transformer_type not in ['normal_transformer', 'shadow_audio']:
+            raise ValueError(f"Unknown transformer_type: {config.transformer_type}")
 
         # --- handle derived n_embd for zeropad ---
         if config.posenc_type == "zeropad":
@@ -219,7 +224,8 @@ class GPT(nn.Module):
             for p in self.transformer.wpe.parameters():
                 p.requires_grad = False
 
-        if config.audio_dim > 0:
+        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        if enable_audio:
             self.transformer.w_audio = nn.Embedding(config.vocab_size, config.audio_dim)
             self.audio_ln_f = LayerNorm(config.audio_dim, bias=config.bias)
             self.forward = self._forward_with_audio

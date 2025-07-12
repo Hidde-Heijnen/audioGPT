@@ -76,9 +76,10 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 freeze_embeddings = False # whether to freeze embedding layers
-locked_embeddings = None # column name in parquet file to use for locked embeddings (e.g. "4096_vec"), or None to disable
-audio_dim = 0  # dimension for audio channel, 0 to disable
-audio_locked = None  # column name for locked audio embeddings, None to disable
+locked_embeddings = None # column name in parquet file to use for locked embeddings in the main transformer (non-shadow part) (e.g. "4096_vec"), or None to disable
+shadow_audio_col = None  # None to disable, or string column name for locked audio embeddings
+transformer_type = 'normal_transformer'  # 'normal_transformer' or 'shadow_audio'
+audio_dim = 0 # audio embedding dimension for shadow audio transformers (automatically detected if 0 and shadow_audio_col is not None )
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
@@ -159,8 +160,8 @@ if os.path.exists(meta_path):
 parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
 df = None  # Initialize dataframe variable
 
-# Load parquet file once if either locked_embeddings or audio_locked is specified
-if locked_embeddings is not None or audio_locked is not None:
+# Load parquet file once if either locked_embeddings or shadow_audio_col is specified
+if locked_embeddings is not None or shadow_audio_col is not None:
     if not os.path.exists(parquet_path):
         raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
     
@@ -191,24 +192,28 @@ if locked_embeddings is not None:
     config['n_embd'] = n_embd
     config['embed_dim_token'] = embed_dim_token
 
-# check for audio locked embeddings
-if audio_locked is not None:
-    if audio_locked not in df.columns:
-        raise ValueError(f"Column '{audio_locked}' not found in parquet file. Available columns: {list(df.columns)}")
+# Initialize audio dimension
+if shadow_audio_col is not None and transformer_type == 'shadow_audio':
+    if shadow_audio_col not in df.columns:
+        raise ValueError(f"Column '{shadow_audio_col}' not found in parquet file. Available columns: {list(df.columns)}")
     
-    print(f"Detecting audio embedding dimension from column '{audio_locked}'...")
-    # Get embedding dimension from first embedding
-    sample_embedding = df[audio_locked].iloc[0]
-    detected_audio_dim = len(sample_embedding)
+    print(f"Detecting audio embedding dimension from column '{shadow_audio_col}'...")
+    # Sample two embeddings to check consistency
+    sample1 = df[shadow_audio_col].iloc[0]
+    sample2 = df[shadow_audio_col].iloc[1]
+    dim1 = len(sample1)
+    dim2 = len(sample2)
+    if dim1 != dim2:
+        raise ValueError("Inconsistent embedding dimensions in shadow_audio_col")
     
-    print(f"Detected audio embedding dimension: {detected_audio_dim}")
-    if audio_dim == 0:
-        print(f"Setting audio_dim to {detected_audio_dim}")
-        audio_dim = detected_audio_dim
-        globals()['audio_dim'] = audio_dim
-        config['audio_dim'] = audio_dim
-    elif audio_dim != detected_audio_dim:
-        raise ValueError(f"Specified audio_dim {audio_dim} does not match detected {detected_audio_dim}")
+    detected_audio_dim = dim1
+    print(f"Detected audio_dim={detected_audio_dim} from column '{shadow_audio_col}'")
+    config['audio_dim'] = detected_audio_dim
+elif shadow_audio_col is None and transformer_type == 'shadow_audio':
+    raise ValueError("shadow_audio_col required for shadow_audio transformer_type")
+else:
+    detected_audio_dim = 0
+    config['audio_dim'] = detected_audio_dim
 
 # model init
 # Collect model args, now including optional positional encoding knobs
@@ -221,7 +226,8 @@ for _k in ("posenc_type", "embed_dim_token", "extra_dim", "posenc_scale"):
         model_args[_k] = globals()[_k]
 
 # Audio options
-model_args['audio_dim'] = audio_dim
+model_args['audio_dim'] = detected_audio_dim
+model_args['transformer_type'] = transformer_type
 
 if init_from == 'scratch':
     # init a new model from scratch
@@ -240,7 +246,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type']:
         model_args[k] = checkpoint_model_args[k]
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -264,7 +270,7 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type']:
         model_args[k] = getattr(model.config, k)
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -370,16 +376,16 @@ if locked_embeddings is not None:
     # Update config for wandb logging
     config['freeze_embeddings'] = freeze_embeddings
 
-if audio_dim > 0 and audio_locked is not None:
+if shadow_audio_col is not None:
     if meta_path is None or not os.path.exists(meta_path):
         raise FileNotFoundError(f"Meta file not found: {meta_path}. Cannot load locked audio embeddings without vocabulary mapping.")
     
     # Load the locked audio embeddings
-    embedding_matrix = load_locked_embeddings(parquet_path, audio_locked, meta_path, df)
+    embedding_matrix = load_locked_embeddings(parquet_path, shadow_audio_col, meta_path, df)
     
     # Sanity check
-    if embedding_matrix.shape[1] != model.config.audio_dim:
-        raise ValueError(f"Audio embedding dimension mismatch: expected {model.config.audio_dim}, got {embedding_matrix.shape[1]}")
+    if embedding_matrix.shape[1] != detected_audio_dim:
+        raise ValueError(f"Audio embedding dimension mismatch: expected {detected_audio_dim}, got {embedding_matrix.shape[1]}")
     
     if embedding_matrix.shape[0] != model.config.vocab_size:
         raise ValueError(f"Vocab size mismatch: expected {model.config.vocab_size}, got {embedding_matrix.shape[0]}")
@@ -391,10 +397,10 @@ if audio_dim > 0 and audio_locked is not None:
     
     print(f"Loaded locked audio embeddings with shape {embedding_matrix.shape}")
     
-    # Automatically freeze audio embeddings
-    freeze_embeddings = True
-    print("Automatically enabling freeze_embeddings for audio when using audio_locked")
-    config['freeze_embeddings'] = freeze_embeddings
+    # Note: Shadow audio embeddings are always frozen by design separately, don't override freeze_embeddings (see w_audio below)
+    print("Shadow audio embeddings will be frozen (they are always frozen by design)")
+
+
 
 model.to(device)
 
@@ -410,10 +416,12 @@ if freeze_embeddings:
     assert not model.transformer.wte.weight.requires_grad, "Token embeddings should be frozen when freeze_embeddings=True"
     assert not model.lm_head.weight.requires_grad, "Output embeddings should be frozen when freeze_embeddings=True"
 
-    # freeze audio if present
-    if hasattr(model.transformer, 'w_audio'):
-        model.transformer.w_audio.weight.requires_grad = False
-        assert not model.transformer.w_audio.weight.requires_grad, "Audio embeddings should be frozen when freeze_embeddings=True"
+# freeze shadow audio embeddings if present (they are always frozen by design)
+# w_audio is the shadow audio embedding layer (nn.Embedding) that maps token IDs to audio embeddings
+if hasattr(model.transformer, 'w_audio'):
+    print("freezing shadow audio embeddings (always frozen by design)")
+    model.transformer.w_audio.weight.requires_grad = False
+    assert not model.transformer.w_audio.weight.requires_grad, "Shadow audio embeddings should always be frozen"
 
 # handle positional embeddings separately based on posenc_type and posenc_scale
 if posenc_type == "learned" and posenc_scale != 0:
