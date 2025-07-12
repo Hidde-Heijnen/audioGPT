@@ -31,6 +31,7 @@ posenc_type = "learned"
 n_layer = 6
 n_head = 8  # 4096 must be divisible by n_head, so using 8 instead of 12
 # n_embd will be automatically detected as 4096 from parquet file
+n_embd = 512
 dropout = 0.0
 bias = False
 
@@ -46,7 +47,7 @@ grad_clip = 1.0
 block_size = 256
 
 warmup_iters = 1000
-lr_decay_iters = 5000  # match max_iters
+lr_decay_iters = 2000  # match max_iters
 
 # device and compilation settings
 # device = 'cuda'
