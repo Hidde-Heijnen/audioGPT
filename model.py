@@ -42,6 +42,10 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.head_out = nn.Identity()
+        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
+            self.head_audio_out = nn.Identity()
+            self.audio_mix_mean = nn.Identity()
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash or config.transformer_type == 'shadow_audio': # we do manual attention for shadow transformer. 
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
@@ -73,6 +77,7 @@ class CausalSelfAttention(nn.Module):
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = self.head_out(y)
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # output projection
@@ -95,13 +100,15 @@ class CausalSelfAttention(nn.Module):
         att = F.softmax(att, dim=-1)
         att_drop = self.attn_dropout(att)
         y = att_drop @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = self.head_out(y)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
         # audio mixing using the same attention weights
         audio_norm = audio_norm.unsqueeze(1)  # (B, 1, T, Da)
         audio_mixed = torch.matmul(att_drop, audio_norm)  # (B, nh, T, T) @ (B, 1, T, Da) -> (B, nh, T, Da)
-        audio_mixed = audio_mixed.mean(dim=1)  # average over heads (B, T, Da)
+        audio_mixed = self.head_audio_out(audio_mixed)
+        audio_mixed = self.audio_mix_mean(audio_mixed.mean(dim=1))  # average over heads (B, T, Da)
 
         # output projection for y
         y = self.resid_dropout(self.c_proj(y))
@@ -124,6 +131,13 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class ResidualAdd(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, orig, add):
+        return orig + add
+
 class Block(nn.Module):
 
     def __init__(self, config):
@@ -132,25 +146,28 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        self.attn_resid = ResidualAdd()
+        self.mlp_resid = ResidualAdd()
         enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
         if enable_audio:
             self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
+            self.audio_attn_resid = ResidualAdd()
             self.forward = self._forward_with_audio
         else:
             self.forward = self._forward_without_audio
 
     def _forward_without_audio(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = self.attn_resid(x, self.attn(self.ln_1(x)))
+        x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
         return x
 
     def _forward_with_audio(self, x, audio):
         x_norm = self.ln_1(x)
         audio_norm = self.audio_ln1(audio)
         y, audio_mixed = self.attn(x_norm, audio_norm)
-        x = x + y
-        audio = audio + audio_mixed
-        x = x + self.mlp(self.ln_2(x))
+        x = self.attn_resid(x, y)
+        audio = self.audio_attn_resid(audio, audio_mixed)
+        x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
         return x, audio
 
 @dataclass
@@ -206,6 +223,9 @@ class GPT(nn.Module):
             pos_emb = None
         else:
             raise ValueError(f"Invalid posenc_type: {config.posenc_type}")
+
+        if config.posenc_type in ("learned", "sinusoidal"):
+            self.pos_add = ResidualAdd()
 
         # --- transformer body (aliases for backward compat) ---
         self.transformer = nn.ModuleDict(dict(
@@ -277,7 +297,7 @@ class GPT(nn.Module):
         if self.config.posenc_type in ("learned", "sinusoidal"):
             pos = torch.arange(0, t, dtype=torch.long, device=device)
             pos_emb = self.pos_emb(pos)  # (T, n_embd)
-            x = tok_emb + self.config.posenc_scale * pos_emb
+            x = self.pos_add(tok_emb, self.config.posenc_scale * pos_emb)
         elif self.config.posenc_type == "zeropad":
             x = self._pad_token_batch(tok_emb)
         else:  # "none"
@@ -313,7 +333,7 @@ class GPT(nn.Module):
         if self.config.posenc_type in ("learned", "sinusoidal"):
             pos = torch.arange(0, t, dtype=torch.long, device=device)
             pos_emb = self.pos_emb(pos)  # (T, n_embd)
-            x = tok_emb + self.config.posenc_scale * pos_emb
+            x = self.pos_add(tok_emb, self.config.posenc_scale * pos_emb)
             audio = audio_emb  # no positional encoding for audio
         elif self.config.posenc_type == "zeropad":
             x = self._pad_token_batch(tok_emb)

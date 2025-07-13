@@ -8,34 +8,38 @@
 
 import os
 import pickle
-import torch
 from contextlib import nullcontext
+import torch
 import argparse
 import ast
 import numpy as np
-from model import GPTConfig, GPT
-from tokenizer import get_tokenizer  # Adjust if needed
+from model import GPTConfig, GPT 
+from capture_manager import CaptureManager
+from tokenizer import get_tokenizer
 
-# %% [markdown]
-## Parameters
-# Expanded extraction points based on model analysis
-# Interesting points:
-# - 'wte': Main token embeddings (locked if locked_embeddings set in train.py)
-# - 'w_audio': Shadow audio embeddings (always locked if shadow_audio in model.py)
-# - 'after_posenc': After positional encoding addition (if enabled in config)
-# - Per block (layer_idx):
-#   - 'after_attn': After attention (y and audio_mixed if shadow)
-#   - 'after_attn_resid': After attention residual (x + y, audio + audio_mixed)
-#   - 'after_mlp': After MLP
-#   - 'after_mlp_resid': After MLP residual
-# - 'final_ln': After final LayerNorm on token path
-# - 'audio_final_ln': After final LayerNorm on audio path (if shadow)
+# Example extract_points: flexible tuples for points
+# - 'wte': main embeddings
+# - 'w_audio': audio embeddings (if shadow)
+# - 'after_posenc': after positional addition (if enabled)
+# - (layer, 'after_ln1'): after ln1
+# - (layer, 'after_audio_ln1'): after audio ln1 (shadow)
+# - (layer, 'after_attn', head?): after attn (per head if specified, token path)
+# - (layer, 'after_audio_attn', head?): after audio attn mix (per head before mean if specified)
+# - (layer, 'after_attn_resid'): after attn residual
+# - (layer, 'after_audio_attn_resid'): after audio attn residual
+# - (layer, 'after_ln2'): after ln2
+# - (layer, 'after_mlp'): after mlp
+# - (layer, 'after_mlp_resid'): after mlp residual
+# - 'final_ln': final ln (token)
+# - 'audio_final_ln': final audio ln (shadow)
 extract_points = [
     ('wte',),
     ('w_audio',),
     ('after_posenc',),
-    (0, 'after_attn', 0),  # Layer 0 after attn, head 0
+    (0, 'after_attn', 0),  # Layer 0, after attn token, head 0
+    (0, 'after_audio_attn', 0),  # Layer 0, after audio attn, head 0
     (0, 'after_attn_resid'),
+    (0, 'after_audio_attn_resid'),
     (0, 'after_mlp'),
     (0, 'after_mlp_resid'),
     ('final_ln',),
@@ -106,125 +110,55 @@ if dataset:
 else:
     raise ValueError('No dataset found in checkpoint config')
 
-# %% [markdown]
-## Setup Hooks
-
-captured_vectors = {}
-
-def capture_embedding(module, input, output):
-    captured_vectors[module.__class__.__name__] = output.detach().cpu()
-
-def capture_after_posenc():
-    # This would require modifying forward; instead, run a dummy forward and capture
-    pass  # Placeholder; implement if needed
-
-# Hook setup
-hooks = []
-for point in extract_points:
-    if len(point) == 1:
-        if point[0] == 'wte':
-            module = model.transformer.wte
-            hooks.append(module.register_forward_hook(lambda m,i,o: captured_vectors.update({'wte': o.detach().cpu()})))
-        elif point[0] == 'w_audio' and hasattr(model.transformer, 'w_audio'):
-            module = model.transformer.w_audio
-            hooks.append(module.register_forward_hook(lambda m,i,o: captured_vectors.update({'w_audio': o.detach().cpu()})))
-        elif point[0] == 'final_ln':
-            module = model.transformer.ln_f
-            hooks.append(module.register_forward_hook(lambda m,i,o: captured_vectors.update({'final_ln': o.detach().cpu()})))
-        elif point[0] == 'audio_final_ln' and hasattr(model, 'audio_ln_f'):
-            module = model.audio_ln_f
-            hooks.append(module.register_forward_hook(lambda m,i,o: captured_vectors.update({'audio_final_ln': o.detach().cpu()})))
-    else:
-        layer_idx = point[0]
-        point_name = point[1]
-        head_idx = point[2] if len(point) > 2 else None
-        block = model.transformer.h[layer_idx]
-        if 'attn' in point_name:
-            def attn_hook(m, i, o):
-                key = (layer_idx, 'after_attn', head_idx)
-                if isinstance(o, tuple):
-                    y, audio_mixed = o
-                    captured_vectors[key] = {'token': y.detach().cpu(), 'audio': audio_mixed.detach().cpu()}
-                else:
-                    captured_vectors[key] = o.detach().cpu()
-                if head_idx is not None:
-                    hs = m.n_embd // m.n_head
-                    head_out = o[:, head_idx * hs : (head_idx + 1) * hs].detach().cpu() if not isinstance(o, tuple) else o[0][:, head_idx * hs : (head_idx + 1) * hs].detach().cpu()
-                    captured_vectors[key + ('head',)] = head_out
-            hooks.append(block.attn.register_forward_hook(attn_hook))
-        if 'mlp' in point_name:
-            def mlp_hook(m, i, o):
-                captured_vectors[(layer_idx, 'after_mlp')] = o.detach().cpu()
-            hooks.append(block.mlp.register_forward_hook(mlp_hook))
-        # For residuals, would need to hook multiple and compute; simplify by capturing outputs
-
-# %% [markdown]
-## Generation and Extraction
-
-# Encode start prompt (simplified, adjust for your tokenizer)
-start_ids = encode(start)  # Assume encode function is defined
+# Generation and Extraction
+start_ids = encode(start)
 x = torch.tensor(start_ids, dtype=torch.long, device=device).unsqueeze(0)
 
 with torch.no_grad():
     with ctx:
-        y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-        print(decode(y[0].tolist()))  # Assume decode is defined
+        with CaptureManager(model, extract_points, listen_index) as manager:
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+        captured_vectors = manager.captures
+print(decode(y[0].tolist()))
 
-# For residuals and after_posenc, these might require custom logic or additional hooks
-
-# %% [markdown]
-## Audio Playback
-# Moved playback here, removed saving
-
+# Audio Playback
 from IPython.display import Audio, display
-import numpy as np
 
-rate = 22050
+rate = 8000  # From dataset prep: resampled to 8000 Hz
 spacing_duration = 1.0
 spacing = np.zeros(int(rate * spacing_duration))
 
 def play_vector(vec, label):
-    if isinstance(vec, torch.Tensor):
-        vec = vec.flatten().numpy()
-    elif isinstance(vec, dict):
-        for k, v in vec.items():
-            play_vector(v, f'{label}_{k}')
-        return
+    vec = vec.squeeze()  # Remove singleton dimensions (e.g., batch/T/nh dims that should be 1 after slicing)
+
+    # Expected shape after squeeze: 1D tensor representing single-channel audio samples.
+    # Rationale: The audio data is single-channel; if multi-dimensional, it indicates an error in vector extraction or unexpected model output. We raise an error to catch such issues rather than silently averaging.
+
+    if vec.dim() > 1:
+        raise ValueError(f"Unexpected multi-dimensional tensor after squeeze: {vec.shape}. Expected 1D for single-channel audio.")
+
+    vec = vec.numpy()
     display(Audio(vec, rate=rate))
     print(label)
 
 # Play individuals
 for key, vec in captured_vectors.items():
-    play_vector(vec, str(key))
+    play_vector(vec, key)
 
 # Concatenated
 all_audio = []
 for key in sorted(captured_vectors.keys()):
-    vec = captured_vectors[key]
-    if isinstance(vec, dict):
-        vec = vec.get('audio', vec.get('token')).flatten().numpy()
-    else:
-        vec = vec.flatten().numpy()
+    vec = captured_vectors[key].squeeze()
+
+    # Expected shape after squeeze: 1D tensor representing single-channel audio samples.
+    # Rationale: Same as above - single-channel audio; raise error on unexpected shapes.
+
+    if vec.dim() > 1:
+        raise ValueError(f"Unexpected multi-dimensional tensor after squeeze: {vec.shape}. Expected 1D for single-channel audio.")
+
+    vec = vec.numpy()
     all_audio.append(vec)
     all_audio.append(spacing)
 concatenated = np.concatenate(all_audio)
 display(Audio(concatenated, rate=rate))
 print('Concatenated evolution')
-
-# %% [markdown]
-## Listen to Embeddings
-# Extract and play main/shadow embedding vectors (e.g., average or specific token)
-
-token_id = 0  # Example token to 'listen' to
-main_emb = model.transformer.wte.weight[token_id].detach().cpu()
-play_vector(main_emb, 'Main Embedding')
-
-if hasattr(model.transformer, 'w_audio'):
-    shadow_emb = model.transformer.w_audio.weight[token_id].detach().cpu()
-    play_vector(shadow_emb, 'Shadow Audio Embedding') 
-
-# %% [markdown]
-## Cleanup
-
-for hook in hooks:
-    hook.remove() 
