@@ -36,7 +36,7 @@ dropout = 0.0
 bias = False
 
 learning_rate = 5e-4
-max_iters = 2000    # extended training
+max_iters = 5000    # extended training
 decay_lr = True
 min_lr = 6e-5
 beta1 = 0.90
@@ -47,7 +47,7 @@ grad_clip = 1.0
 block_size = 256
 
 warmup_iters = 1000
-lr_decay_iters = 2000  # match max_iters
+lr_decay_iters = 5000  # match max_iters
 
 # device and compilation settings
 # device = 'cuda'
