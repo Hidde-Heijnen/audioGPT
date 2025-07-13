@@ -190,6 +190,9 @@ class GPTConfig:
     # --- new fields for audio channel ---
     audio_dim: int = 0  # if >0, enable audio shadow channel with this dimension
     transformer_type: str = 'normal_transformer'  # 'normal_transformer' | 'shadow_audio'
+    # --- new fields for audio alignment loss ---
+    audio_alignment_loss: bool = False
+    audio_alignment_lambda: float = 1.0
 
 class GPT(nn.Module):
 
@@ -350,10 +353,16 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         audio = self.audio_ln_f(audio)  # apply final norm to audio
 
-        if targets is not None:
+        if targets is not None: # so when training, should be None during inference
             h = self._extract_token_slice(x)
             logits = F.linear(h, self.lm_head_weight)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.config.audio_alignment_loss:
+                probs = F.softmax(logits, dim=-1)  # (B, T, V)
+                W_audio = self.transformer.w_audio.weight  # (V, Da)
+                expected_audio = probs @ W_audio  # (B, T, Da)
+                aux_loss = self.config.audio_alignment_lambda * ((audio - expected_audio) ** 2).mean()
+                loss = loss + aux_loss
         else:
             x_last = x[:, [-1], :]
             h_last = self._extract_token_slice(x_last)
