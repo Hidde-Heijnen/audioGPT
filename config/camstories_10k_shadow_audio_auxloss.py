@@ -1,6 +1,6 @@
-# train a model with locked 4096-dimensional embeddings from parquet file
+# train a shadow audio model with locked audio embeddings from parquet file
 
-out_dir = 'out/camstories_10k_locked_audio_embeddings_5k_iters_eos'
+out_dir = 'out/camstories_10k_shadow_audio_auxloss_run1'
 eval_interval = 500        # regular eval interval after 1000 iterations
 early_eval_interval = 100  # eval interval for first 1000 iterations
 eval_iters = 100
@@ -11,21 +11,29 @@ wandb_log = False                # set True via CLI if needed
 wandb_project = 'audiogpt'
 
 dataset = 'camstories/10000'  # use the normal camstories dataset
-gradient_accumulation_steps = 10
+gradient_accumulation_steps = 5
 batch_size = 64
 
+# --- Shadow Audio Transformer ---
+transformer_type = 'shadow_audio'  # enable shadow audio transformer
+shadow_audio_col = '4096_vec'      # column name for locked audio embeddings
+audio_alignment_loss = True
+audio_alignment_lambda = 1.0
+# audio_dim will be automatically detected from parquet file
+
 # --- Locked Embeddings ---
-locked_embeddings = '4096_vec'  # use 4096-dimensional embeddings from parquet
-freeze_embeddings = True        # will be automatically set, but explicit here
+# locked_embeddings = '4096_vec'  # use 4096-dimensional embeddings from parquet otherwise comment out. 
+# freeze_embeddings = True        # will be automatically set, but explicit here
 
 # --- Positional Encoding settings ---
 # Options: "learned", "zeropad", "none"
-posenc_type = "none"
+posenc_type = "learned"
 
 # model: n_embd will be automatically set to 4096 from parquet file
 n_layer = 6
-n_head = 8  # 4096 must be divisible by n_head, so using 16 instead of 12
+n_head = 8  # 4096 must be divisible by n_head, so using 8 instead of 12
 # n_embd will be automatically detected as 4096 from parquet file
+n_embd = 512
 dropout = 0.0
 bias = False
 
@@ -47,4 +55,4 @@ lr_decay_iters = 5000  # match max_iters
 # device = 'cuda'
 # compile = False
 seed = 1337 
-dtype = 'bfloat16'
+dtype = 'bfloat16' 

@@ -1,6 +1,6 @@
 # train a shadow audio model with locked audio embeddings from parquet file
 
-out_dir = 'out/camstories_10k_shadow_audio_run1'
+out_dir = 'out/camstories_10k_shadow_audio_run1_eos'
 eval_interval = 500        # regular eval interval after 1000 iterations
 early_eval_interval = 100  # eval interval for first 1000 iterations
 eval_iters = 100

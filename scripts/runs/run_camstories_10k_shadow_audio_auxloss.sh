@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=camstories_10k_locked_embeddings
+#SBATCH --job-name=camstories_10k_shadow_audio
 #SBATCH -A MLMI-HRAH2-SL2-GPU
 #SBATCH -p ampere
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
 #SBATCH --ntasks=1
 #SBATCH --mem=32G
-#SBATCH --time=16:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -31,6 +31,6 @@ mkdir -p "$WANDB_DIR"
 echo "[$(date)] job $SLURM_JOB_ID on $(hostname) GPU:$CUDA_VISIBLE_DEVICES"
 
 cd ~/rds/hpc-work/audioGPT
-python train.py config/camstories_10k_locked_embeddings.py --wandb_log=True --wandb_run_name=camstories-10k-audio-embeddings-run10_5k_iters_eos
+python train.py config/camstories_10k_shadow_audio_auxloss.py --wandb_log=True --wandb_run_name=camstories-10k-shadow-audio-auxloss-run1
 
 echo "[$(date)] finished" 
