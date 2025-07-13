@@ -17,6 +17,11 @@ from model import GPTConfig, GPT
 from capture_manager import CaptureManager
 from tokenizer import get_tokenizer
 
+# %% [markdown]
+## Parameters
+
+# %% Parameters
+
 # Example extract_points: flexible tuples for points
 # - 'wte': main embeddings
 # - 'w_audio': audio embeddings (if shadow)
@@ -33,30 +38,30 @@ from tokenizer import get_tokenizer
 # - 'final_ln': final ln (token)
 # - 'audio_final_ln': final audio ln (shadow)
 extract_points = [
-    ('wte',),
+    # ('wte',),
     ('w_audio',),
-    ('after_posenc',),
-    (0, 'after_attn', 0),  # Layer 0, after attn token, head 0
+    # ('after_posenc',),
+    # (0, 'after_attn', 0),  # Layer 0, after attn token, head 0
     (0, 'after_audio_attn', 0),  # Layer 0, after audio attn, head 0
     (0, 'after_attn_resid'),
     (0, 'after_audio_attn_resid'),
-    (0, 'after_mlp'),
-    (0, 'after_mlp_resid'),
-    ('final_ln',),
+    # (0, 'after_mlp'),
+    # (0, 'after_mlp_resid'),
+    # ('final_ln',),
     ('audio_final_ln',)
 ]
 
 init_from = 'resume'
 out_dir = 'out/camstories_10k_shadow_audio_run1'
-start = '<|endoftext|>'
+start = '<|endoftext|> Frankie was so tired so he went to'
 num_samples = 1
 max_new_tokens = 100
 temperature = 0.8
 top_k = 200
 seed = 1337
-device = 'cuda'
+device = 'cpu' # 'cpu' or 'cuda'
 dtype = 'bfloat16'
-listen_index = -1  # Position in sequence to listen to (-1 for last)
+listen_index = 2  # Position in sequence to listen to (-1 for last)
 
 # %% [markdown]
 ## Paths and Config
@@ -100,18 +105,24 @@ if dataset:
             meta = pickle.load(f)
         stoi = meta['stoi']
         itos = meta['itos']
-        encode = lambda s: [stoi[c] for c in s]
-        decode = lambda l: ''.join([itos[i] for i in l])
+        # Use proper tokenizer instead of character-level encoding
+        tokenizer = get_tokenizer('word_level', 'camstories', 10000, built_vocab=True)
+        encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=False)['input_ids'][0].tolist()
+        decode = lambda l: tokenizer.decode(l)
     else:
         print(f'No meta.pkl found, using default camstories tokenizer')
         tokenizer = get_tokenizer('word_level', 'camstories', 10000, built_vocab=True)
-        encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=True)['input_ids'][0].tolist()
+        encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=False)['input_ids'][0].tolist()
         decode = lambda l: tokenizer.decode(l)
 else:
     raise ValueError('No dataset found in checkpoint config')
 
 # Generation and Extraction
 start_ids = encode(start)
+print(f"Start string: '{start}'")
+print(f"Tokenized as: {start_ids}")
+print(f"Decoded tokens: {[decode([token_id]) for token_id in start_ids]}")
+print(f"Listen index: {listen_index}")
 x = torch.tensor(start_ids, dtype=torch.long, device=device).unsqueeze(0)
 
 with torch.no_grad():
@@ -121,7 +132,7 @@ with torch.no_grad():
         captured_vectors = manager.captures
 print(decode(y[0].tolist()))
 
-# Audio Playback
+# %% Audio Playback
 from IPython.display import Audio, display
 
 rate = 8000  # From dataset prep: resampled to 8000 Hz
@@ -138,14 +149,14 @@ def play_vector(vec, label):
         raise ValueError(f"Unexpected multi-dimensional tensor after squeeze: {vec.shape}. Expected 1D for single-channel audio.")
 
     vec = vec.numpy()
+    print(label)  # Print label before audio display
     display(Audio(vec, rate=rate))
-    print(label)
 
-# Play individuals
+# %% Play individuals
 for key, vec in captured_vectors.items():
     play_vector(vec, key)
 
-# Concatenated
+# %% Concatenated
 all_audio = []
 for key in sorted(captured_vectors.keys()):
     vec = captured_vectors[key].squeeze()
@@ -160,5 +171,5 @@ for key in sorted(captured_vectors.keys()):
     all_audio.append(vec)
     all_audio.append(spacing)
 concatenated = np.concatenate(all_audio)
+print('Concatenated evolution')  # Print label before audio display
 display(Audio(concatenated, rate=rate))
-print('Concatenated evolution')
