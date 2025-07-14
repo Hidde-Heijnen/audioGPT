@@ -347,7 +347,6 @@ def load_locked_embeddings(parquet_path, embed_col, meta_path, df=None):
             token_id = stoi[token]
             # embedding_matrix[token_id] = np.zeros(embed_dim, dtype=np.float32)
             embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
-            print(f"Initialized token {token} with Gaussian noise")
         print(f"Initialized {len(missing_tokens)} missing tokens with Gaussian noise")
     
     print(f"Successfully loaded embeddings for {len(token_to_embed)} tokens")

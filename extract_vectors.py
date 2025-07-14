@@ -42,9 +42,14 @@ extract_points = [
     ('w_audio',),
     # ('after_posenc',),
     # (0, 'after_attn', 0),  # Layer 0, after attn token, head 0
-    (0, 'after_audio_attn', 0),  # Layer 0, after audio attn, head 0
-    (0, 'after_attn_resid'),
+    # (0, 'after_audio_attn', 0),  # Layer 0, after audio attn, head 0
+    # (0, 'after_attn_resid'),
     (0, 'after_audio_attn_resid'),
+    (1, 'after_audio_attn_resid'),
+    (2, 'after_audio_attn_resid'),
+    (3, 'after_audio_attn_resid'),
+    (4, 'after_audio_attn_resid'),
+    (5, 'after_audio_attn_resid'),
     # (0, 'after_mlp'),
     # (0, 'after_mlp_resid'),
     # ('final_ln',),
@@ -52,7 +57,8 @@ extract_points = [
 ]
 
 init_from = 'resume'
-out_dir = 'out/camstories_10k_shadow_audio_run1'
+# out_dir = 'out/camstories_10k_shadow_audio_run1'
+out_dir = 'out/camstories_10k_shadow_audio_auxloss_run1'
 start = '<|endoftext|> Frankie was so tired so he went to'
 num_samples = 1
 max_new_tokens = 100
@@ -61,7 +67,7 @@ top_k = 200
 seed = 1337
 device = 'cpu' # 'cpu' or 'cuda'
 dtype = 'bfloat16'
-listen_index = 2  # Position in sequence to listen to (-1 for last)
+listen_index = 8  # Position in sequence to listen to (-1 for last)
 
 # %% [markdown]
 ## Paths and Config
@@ -156,7 +162,32 @@ def play_vector(vec, label):
 for key, vec in captured_vectors.items():
     play_vector(vec, key)
 
-# %% Concatenated
+# %% Normalized Concatenated
+# Normalize all vectors to similar amplitude before concatenating
+normalized_audio = []
+for key in sorted(captured_vectors.keys()):
+    vec = captured_vectors[key].squeeze()
+
+    # Expected shape after squeeze: 1D tensor representing single-channel audio samples.
+    # Rationale: Same as above - single-channel audio; raise error on unexpected shapes.
+
+    if vec.dim() > 1:
+        raise ValueError(f"Unexpected multi-dimensional tensor after squeeze: {vec.shape}. Expected 1D for single-channel audio.")
+
+    vec = vec.numpy()
+    
+    # Normalize to [-1, 1] range for consistent volume
+    if np.max(np.abs(vec)) > 0:  # Avoid division by zero
+        vec = vec / np.max(np.abs(vec))
+    
+    normalized_audio.append(vec)
+    normalized_audio.append(spacing)
+
+normalized_concatenated = np.concatenate(normalized_audio)
+print('Normalized concatenated evolution')  # Print label before audio display
+display(Audio(normalized_concatenated, rate=rate))
+
+# %% Concatenated (Original)
 all_audio = []
 for key in sorted(captured_vectors.keys()):
     vec = captured_vectors[key].squeeze()
@@ -171,5 +202,5 @@ for key in sorted(captured_vectors.keys()):
     all_audio.append(vec)
     all_audio.append(spacing)
 concatenated = np.concatenate(all_audio)
-print('Concatenated evolution')  # Print label before audio display
+print('Concatenated evolution (original volumes)')  # Print label before audio display
 display(Audio(concatenated, rate=rate))
