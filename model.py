@@ -357,11 +357,18 @@ class GPT(nn.Module):
             h = self._extract_token_slice(x)
             logits = F.linear(h, self.lm_head_weight)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            # if self.config.audio_alignment_loss:
+            #     probs = F.softmax(logits, dim=-1)  # (B, T, V)
+            #     W_audio = self.transformer.w_audio.weight  # (V, Da)
+            #     expected_audio = probs @ W_audio  # (B, T, Da)
+            #     aux_loss = self.config.audio_alignment_lambda * ((audio - expected_audio) ** 2).mean()
+            #     loss = loss + aux_loss
             if self.config.audio_alignment_loss:
-                probs = F.softmax(logits, dim=-1)  # (B, T, V)
+                valid_mask = (targets != -1).unsqueeze(-1).expand_as(audio).float()
                 W_audio = self.transformer.w_audio.weight  # (V, Da)
-                expected_audio = probs @ W_audio  # (B, T, Da)
-                aux_loss = self.config.audio_alignment_lambda * ((audio - expected_audio) ** 2).mean()
+                target_audio = W_audio[targets.clamp(0)]  # Clamp to avoid index error on -1, but mask will ignore
+                squared_diff = (audio - target_audio) ** 2
+                aux_loss = self.config.audio_alignment_lambda * (squared_diff * valid_mask).sum() / valid_mask.sum().clamp(min=1)
                 loss = loss + aux_loss
         else:
             x_last = x[:, [-1], :]
