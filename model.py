@@ -15,6 +15,26 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+class StandardSoftmax(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return F.softmax(x, dim=-1)
+
+class OffByOneSoftmax(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        max_x, _ = torch.max(x, dim=-1, keepdim=True)
+        shifted_x = x - max_x
+        exp_x = torch.exp(shifted_x)
+        sum_exp = exp_x.sum(dim=-1, keepdim=True)
+        implicit = torch.exp(-max_x)
+        denom = sum_exp + implicit
+        return exp_x / denom
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -47,6 +67,10 @@ class CausalSelfAttention(nn.Module):
             self.head_audio_out = nn.Identity()
             self.audio_mix_mean = nn.Identity()
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if config.softmax_off_by_one and self.flash:
+            self.flash = False
+            print("Disabling flash attention because softmax_off_by_one is enabled")
+        self.my_softmax = OffByOneSoftmax() if config.softmax_off_by_one else StandardSoftmax()
         if not self.flash or config.transformer_type == 'shadow_audio': # we do manual attention for shadow transformer. 
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -74,7 +98,7 @@ class CausalSelfAttention(nn.Module):
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
+            att = self.my_softmax(att)
             att = self.attn_dropout(att)
             y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = self.head_out(y)
@@ -97,7 +121,7 @@ class CausalSelfAttention(nn.Module):
         # for audio mixing. Flash attention doesn't expose attention weights, so we can't use it.
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
+        att = self.my_softmax(att)
         att_drop = self.attn_dropout(att)
         y = att_drop @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = self.head_out(y)
@@ -193,6 +217,8 @@ class GPTConfig:
     # --- new fields for audio alignment loss ---
     audio_alignment_loss: bool = False
     audio_alignment_lambda: float = 1.0
+    use_sink_token: bool = False
+    softmax_off_by_one: bool = False
 
 class GPT(nn.Module):
 
@@ -361,10 +387,17 @@ class GPT(nn.Module):
             #     probs = F.softmax(logits, dim=-1)  # (B, T, V)
             #     W_audio = self.transformer.w_audio.weight  # (V, Da)
             #     expected_audio = probs @ W_audio  # (B, T, Da)
-            #     aux_loss = self.config.audio_alignment_lambda * ((audio - expected_audio) ** 2).mean()
+            #     squared_diff = (audio - expected_audio) ** 2
+            #     if self.config.use_sink_token:
+            #         mask = torch.ones_like(squared_diff)
+            #         mask[:, 0] = 0.0  # Mask t=0 (sink position)
+            #         squared_diff = squared_diff * mask
+            #     aux_loss = self.config.audio_alignment_lambda * squared_diff.mean()
             #     loss = loss + aux_loss
             if self.config.audio_alignment_loss:
                 valid_mask = (targets != -1).unsqueeze(-1).expand_as(audio).float()
+                if self.config.use_sink_token:
+                    valid_mask[:, 0] = 0.0  # Mask t=0 (sink position) to avoid zero-vs-real penalty
                 W_audio = self.transformer.w_audio.weight  # (V, Da)
                 target_audio = W_audio[targets.clamp(0)]  # Clamp to avoid index error on -1, but mask will ignore
                 squared_diff = (audio - target_audio) ** 2

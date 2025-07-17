@@ -98,10 +98,13 @@ state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.'
 for k, v in list(state_dict.items()):
     if k.startswith(unwanted_prefix):
-        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        new_key = k[len(unwanted_prefix):]
+        state_dict[new_key] = state_dict.pop(k)
 model.load_state_dict(state_dict)
 model.eval()
 model.to(device)
+
+use_sink_token = checkpoint['model_args'].get('use_sink_token', False)
 
 # %% [markdown]
 ## Tokenizer Setup
@@ -117,9 +120,22 @@ if dataset:
         stoi = meta['stoi']
         itos = meta['itos']
         # Use proper tokenizer instead of character-level encoding
-        tokenizer = get_tokenizer('word_level', 'camstories', 10000, built_vocab=True)
+        tokenizer = get_tokenizer('word_level', 'camstories', 10000, True)
         encode = lambda s: tokenizer(s, return_tensors='pt', add_special_tokens=False)['input_ids'][0].tolist()
         decode = lambda l: tokenizer.decode(l)
+        
+        if use_sink_token:
+            # Load meta to get stoi
+            meta_path = os.path.join('data', dataset, 'meta.pkl')
+            if os.path.exists(meta_path):
+                with open(meta_path, 'rb') as f:
+                    meta = pickle.load(f)
+                stoi = meta['stoi']
+                if '<|unknown|>' not in stoi:
+                    raise ValueError("<|unknown|> not found for sink token")
+                sink_token_id = stoi['<|unknown|>']
+            else:
+                raise ValueError("meta.pkl not found for camstories dataset")
     else:
         print(f'No meta.pkl found, using default camstories tokenizer')
         tokenizer = get_tokenizer('word_level', 'camstories', 10000, built_vocab=True)
@@ -135,6 +151,9 @@ print(f"Tokenized as: {start_ids}")
 print(f"Decoded tokens: {[decode([token_id]) for token_id in start_ids]}")
 print(f"Listen index: {listen_index}")
 x = torch.tensor(start_ids, dtype=torch.long, device=device).unsqueeze(0)
+if use_sink_token:
+    sink_prefix = torch.tensor([[sink_token_id]], dtype=torch.long, device=device)
+    x = torch.cat((sink_prefix, x), dim=1)
 
 with torch.no_grad():
     with ctx:

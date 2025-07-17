@@ -86,11 +86,17 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 # audio alignment loss
 audio_alignment_loss = False # only used for shadow audio transformers
 audio_alignment_lambda = 1.0 # how much to weight the audio alignment loss
+use_sink_token = False
+softmax_off_by_one = False
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+# Warn if both mitigation techniques are enabled simultaneously
+if use_sink_token and softmax_off_by_one:
+    print("WARNING: Both 'use_sink_token' and 'softmax_off_by_one' are enabled. "
+          "These techniques serve similar purposes and may interact in unexpected ways.")
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run? (multiple GPUs)
@@ -129,7 +135,27 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
+
+
+# init these up here, can override if init_from='resume' (i.e. from a checkpoint)
+iter_num = 0
+best_val_loss = 1e9
+
+# attempt to derive vocab_size from the dataset
+meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_vocab_size = None
+if os.path.exists(meta_path):
+    with open(meta_path, 'rb') as f:
+        meta = pickle.load(f)
+    meta_vocab_size = meta['vocab_size']
+    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+    sink_token_id = None
+    if use_sink_token:
+        if '<|unknown|>' not in meta['stoi']:
+            raise ValueError("<|unknown|> not found in vocabulary for sink token")
+        sink_token_id = meta['stoi']['<|unknown|>']
+
+def get_batch_standard(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -146,18 +172,22 @@ def get_batch(split):
         x, y = x.to(device), y.to(device)
     return x, y
 
-# init these up here, can override if init_from='resume' (i.e. from a checkpoint)
-iter_num = 0
-best_val_loss = 1e9
+def get_batch_sink(split):
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    else:
+        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size + 1, (batch_size,))
+    y = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    sink_prefix = torch.full((batch_size, 1), sink_token_id, dtype=torch.long)
+    x = torch.cat((sink_prefix, y[:, :-1]), dim=1)
+    if device_type == 'cuda':
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
 
-# attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
-meta_vocab_size = None
-if os.path.exists(meta_path):
-    with open(meta_path, 'rb') as f:
-        meta = pickle.load(f)
-    meta_vocab_size = meta['vocab_size']
-    print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+get_batch = get_batch_sink if use_sink_token else get_batch_standard
 
 # check for locked embeddings early to determine embedding dimension
 parquet_path = 'data/audio_embedding/tokens_audio_10k.parquet'
@@ -233,6 +263,8 @@ model_args['audio_dim'] = detected_audio_dim
 model_args['transformer_type'] = transformer_type
 model_args['audio_alignment_loss'] = audio_alignment_loss
 model_args['audio_alignment_lambda'] = audio_alignment_lambda
+model_args['use_sink_token'] = use_sink_token
+model_args['softmax_off_by_one'] = softmax_off_by_one
 
 if init_from == 'scratch':
     # init a new model from scratch
@@ -287,6 +319,27 @@ if block_size < model.config.block_size:
     # Update config for wandb logging
     config['block_size'] = block_size
 
+if use_sink_token:
+    # Decide which channels should have a zero-vector at the sink position:
+    # - Audio channel (w_audio): always zero if present.
+    # - Token channel (wte): zero only if embeddings are locked & frozen; otherwise, let it learn.
+    force_zero_token = locked_embeddings is not None and freeze_embeddings
+
+    with torch.no_grad():
+        if hasattr(model.transformer, 'w_audio'):
+            model.transformer.w_audio.weight[sink_token_id].zero_()
+        if force_zero_token:
+            model.transformer.wte.weight[sink_token_id].zero_()
+
+    if force_zero_token and model.transformer.wte.weight.requires_grad:
+        def _zero_sink_grad(grad, token_id=sink_token_id):
+            grad[token_id].zero_()
+            return grad
+        model.transformer.wte.weight.register_hook(_zero_sink_grad)
+        print(f"Sink token (id {sink_token_id}) initialised to ZERO for token channel (locked & frozen embeddings); gradient hook registered to keep it zero during training.")
+    else:
+        print("Sink token: audio channel always zero; token embedding initialised as Gaussian and will learn (not locked & frozen).")
+
 # load locked embeddings if specified
 def load_locked_embeddings(parquet_path, embed_col, meta_path, df=None):
     """
@@ -339,13 +392,30 @@ def load_locked_embeddings(parquet_path, embed_col, meta_path, df=None):
         else:
             missing_tokens.append(token)
     
+    # ------------------------------------------------------------------
+    # Ensure the sink token (<|unknown|>) is *always* zero-initialised when
+    # use_sink_token is enabled, regardless of whether it was present in the
+    # parquet file. This applies to both wte (locked embeddings path) and
+    # w_audio (shadow-audio path).
+    # ------------------------------------------------------------------
+    if use_sink_token:
+        unknown_token = "<|unknown|>"
+        if unknown_token not in stoi:
+            raise ValueError("<|unknown|> not found in vocabulary for sink token")
+        token_id = stoi[unknown_token]
+        embedding_matrix[token_id].fill(0)
+        print(f"Force-zeroed <|unknown|> token (id {token_id}) for sink token")
+    
     if missing_tokens:
         print(f"WARNING: {len(missing_tokens)} tokens from vocabulary not found in parquet file")
         print(f"First few missing tokens: {missing_tokens[:10]}")
         # Initialize missing tokens with Gaussian noise when using locked embeddings
         for token in missing_tokens:
+            # When a sink token is in use, keep its row zero – do not overwrite
+            # the forced-zero we applied above.
+            if use_sink_token and token == unknown_token:
+                continue
             token_id = stoi[token]
-            # embedding_matrix[token_id] = np.zeros(embed_dim, dtype=np.float32)
             embedding_matrix[token_id] = np.random.normal(0, 0.02, embed_dim)
         print(f"Initialized {len(missing_tokens)} missing tokens with Gaussian noise")
     
@@ -372,6 +442,10 @@ if locked_embeddings is not None:
     embedding_matrix = embedding_matrix.to(ptdtype)
     with torch.no_grad():
         model.transformer.wte.weight.copy_(embedding_matrix)
+        # After copy, *re-zero* the sink token row to guarantee it remains
+        # zero even if the parquet contained non-zero values.
+        if use_sink_token:
+            model.transformer.wte.weight[sink_token_id].zero_()
     
     print(f"Loaded locked embeddings with shape {embedding_matrix.shape}")
     
@@ -399,6 +473,9 @@ if shadow_audio_col is not None:
     embedding_matrix = embedding_matrix.to(ptdtype)
     with torch.no_grad():
         model.transformer.w_audio.weight.copy_(embedding_matrix)
+        # After copy, enforce zero sink token for audio channel as well.
+        if use_sink_token:
+            model.transformer.w_audio.weight[sink_token_id].zero_()
     
     print(f"Loaded locked audio embeddings with shape {embedding_matrix.shape}")
     
@@ -604,7 +681,7 @@ while True:
             log_dict = {
                 "iter": iter_num,
                 "train/loss": lossf,
-                "mfu": running_mfu*100,
+                "mfu": running_mfu,
             }
             if grad_norm is not None:
                 grad_norm_item = grad_norm.item()

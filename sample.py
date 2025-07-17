@@ -40,6 +40,9 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+# Default value for sink token usage; may be overwritten when loading a checkpoint
+use_sink_token = False
+
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
@@ -49,13 +52,15 @@ if init_from == 'resume':
     model = GPT(gptconf)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
+    for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+            new_key = k[len(unwanted_prefix):]
+            state_dict[new_key] = state_dict.pop(k)
     model.load_state_dict(state_dict)
-elif init_from.startswith('gpt2'):
-    # init from a given GPT-2 model
-    model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+    model.eval()
+    model.to(device)
+    
+    use_sink_token = checkpoint['model_args'].get('use_sink_token', False)
 
 model.eval()
 model.to(device)
@@ -272,12 +277,18 @@ else:
         stoi, itos = meta['stoi'], meta['itos']
         encode = lambda s: [stoi[c] for c in s] # Assumes s is iterable and c is in stoi (char-level)
         decode = lambda l: ''.join([itos[i] for i in l])
+        if use_sink_token:
+            if '<|unknown|>' not in stoi:
+                raise ValueError("<|unknown|> not found in stoi for sink token")
+            sink_token_id = stoi['<|unknown|>']
     else:
         # Fallback to GPT-2 encodings if not tinystories and no meta.pkl
         print("No meta.pkl found or not using a recognized custom tokenizer setup, assuming GPT-2 encodings...")
         enc = tiktoken.get_encoding("gpt2")
         encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
         decode = lambda l: enc.decode(l)
+        if use_sink_token:
+            raise NotImplementedError("use_sink_token not supported for GPT-2 encodings")
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
