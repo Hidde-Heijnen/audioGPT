@@ -31,6 +31,6 @@ mkdir -p "$WANDB_DIR"
 echo "[$(date)] job $SLURM_JOB_ID on $(hostname) GPU:$CUDA_VISIBLE_DEVICES"
 
 cd ~/rds/hpc-work/audioGPT
-python train.py config/camstories_10k_shadow_audio_offbyone.py --wandb_log=True --wandb_run_name=camstories-10k-shadow-audio-offbyone-run1
+python train.py config/camstories_10k_shadow_audio_offbyone.py --wandb_log=True --wandb_run_name=camstories-10k-shadow-audio-offbyone-run2
 
 echo "[$(date)] finished" 

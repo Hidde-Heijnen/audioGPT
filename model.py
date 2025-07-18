@@ -190,7 +190,7 @@ class Block(nn.Module):
         audio_norm = self.audio_ln1(audio)
         y, audio_mixed = self.attn(x_norm, audio_norm)
         x = self.attn_resid(x, y)
-        audio = self.audio_attn_resid(audio, audio_mixed)
+        audio = self.audio_attn_resid(audio_norm, audio_mixed)
         x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
         return x, audio
 
