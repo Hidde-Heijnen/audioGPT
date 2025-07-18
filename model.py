@@ -62,10 +62,10 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.head_out = nn.Identity()
+        self.head_out = nn.Identity() # These are just so we can track the vectors with hooks
         if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
-            self.head_audio_out = nn.Identity()
-            self.audio_mix_mean = nn.Identity()
+            self.head_audio_out = nn.Identity() # These are just so we can track the vectors with hooks
+            self.audio_mix_mean = nn.Identity() # These are just so we can track the vectors with hooks
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if config.softmax_off_by_one and self.flash:
             self.flash = False

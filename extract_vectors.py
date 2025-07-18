@@ -13,6 +13,7 @@ import torch
 import argparse
 import ast
 import numpy as np
+import matplotlib.pyplot as plt
 from model import GPTConfig, GPT 
 from capture_manager import CaptureManager
 from tokenizer import get_tokenizer
@@ -49,12 +50,12 @@ extract_points = [
     # (3, 'after_attn_resid'),
     # (4, 'after_attn_resid'),
     # (5, 'after_attn_resid'),
-    (0, 'after_audio_attn'),
-    (1, 'after_audio_attn'),
-    (2, 'after_audio_attn'),
-    (3, 'after_audio_attn'),
-    (4, 'after_audio_attn'),
-    (5, 'after_audio_attn'),
+    (0, 'after_audio_attn_resid', 2),
+    (1, 'after_audio_attn_resid', 2),
+    (2, 'after_audio_attn_resid', 2),
+    (3, 'after_audio_attn_resid', 2),
+    (4, 'after_audio_attn_resid', 2),
+    (5, 'after_audio_attn_resid', 2),
     # (0, 'after_mlp'),
     # (0, 'after_mlp_resid'),
     # ('final_ln',),
@@ -63,16 +64,16 @@ extract_points = [
 
 init_from = 'resume'
 # out_dir = 'out/camstories_10k_shadow_audio_run1'
-out_dir = "out/camstories_10k_shadow_audio_auxloss_run2" 
-start = '<|endoftext|> Frankie was so tired so he went to'
+out_dir = "out/camstories_10k_shadow_audio_offbyone_run1" 
+start = 'Frankie is very tired'
 num_samples = 1
-max_new_tokens = 100
+max_new_tokens = 10
 temperature = 0.8
 top_k = 200
 seed = 1337
 device = 'cpu' # 'cpu' or 'cuda'
 dtype = 'bfloat16'
-listen_index = 8  # Position in sequence to listen to (-1 for last)
+listen_index = 3  # Position in sequence to listen to (-1 for last)
 
 # %% [markdown]
 ## Paths and Config
@@ -248,3 +249,189 @@ for extract_point in extract_points:
 concatenated = np.concatenate(all_audio)
 print('Concatenated evolution (original volumes)')  # Print label before audio display
 display(Audio(concatenated, rate=rate))
+
+# %% [markdown]
+## Attention Visualization
+# Visualize attention patterns for specific layers and heads from extract_points
+
+# %%
+from attention_viz import capture_attention_weights, plot_attention_heatmap, plot_multi_head_attention, analyze_attention_patterns, plot_attention_on_axis
+
+# Extract attention layer/head combinations from extract_points
+attention_points = []
+for point in extract_points:
+    if len(point) == 3 and 'after_audio_attn' in point[1]:
+        layer, stage, head = point
+        attention_points.append((layer, head))
+
+print(f"Will visualize attention for: {attention_points}")
+
+# Get token strings for better visualization  
+tokens = [decode([token_id]) for token_id in y[0].tolist()]
+print(f"Generated sequence tokens: {tokens}")
+
+# %% Attention Weights Table for Listen Index
+# Create tables showing what tokens the listen_index token attends to
+
+import pandas as pd
+
+print(f"\n=== Attention Weights for Token at Position {listen_index} ===")
+
+# Group attention points by head for organized output
+heads_dict = {}
+for layer, head in attention_points:
+    if head not in heads_dict:
+        heads_dict[head] = []
+    heads_dict[head].append(layer)
+
+for head_idx in sorted(heads_dict.keys()):
+    layers = sorted(heads_dict[head_idx])
+    print(f"\n--- Head {head_idx} ---")
+    
+    # Collect attention data for all layers of this head
+    attention_data_by_layer = {}
+    
+    for layer_idx in layers:
+        print(f"Capturing attention for layer {layer_idx}, head {head_idx}...")
+        
+        with torch.no_grad():
+            with ctx:
+                with capture_attention_weights(model, layer_idx) as attention_data:
+                    logits, _ = model(x)
+                
+                layer_attention = attention_data['weights']
+        
+        if layer_attention is not None:
+            # Extract attention weights for the specific token at listen_index
+            seq_len = layer_attention.shape[-1]
+            
+            # Adjust listen_index if it's negative or out of bounds
+            actual_listen_index = listen_index
+            if listen_index < 0:
+                actual_listen_index = seq_len + listen_index
+            
+            if 0 <= actual_listen_index < seq_len:
+                # Get attention weights from listen_index token to all other tokens
+                # Shape: [batch, heads, seq_len, seq_len]
+                token_attention = layer_attention[0, head_idx, actual_listen_index, :seq_len]
+                attention_data_by_layer[layer_idx] = token_attention.cpu().numpy()
+            else:
+                print(f"  Warning: listen_index {listen_index} (adjusted: {actual_listen_index}) out of bounds for sequence length {seq_len}")
+                attention_data_by_layer[layer_idx] = None
+    
+    # Create and display table if we have data
+    if attention_data_by_layer and any(data is not None for data in attention_data_by_layer.values()):
+        # Get the sequence length from the first valid layer
+        seq_len = None
+        for data in attention_data_by_layer.values():
+            if data is not None:
+                seq_len = len(data)
+                break
+        
+        if seq_len is not None:
+            # Create column headers with token strings
+            display_tokens = tokens[:seq_len]
+            column_headers = [f"'{token}' (pos {i})" for i, token in enumerate(display_tokens)]
+            
+            # Create DataFrame
+            table_data = {}
+            for layer_idx in layers:
+                if attention_data_by_layer[layer_idx] is not None:
+                    table_data[f"Layer {layer_idx}"] = attention_data_by_layer[layer_idx]
+                else:
+                    table_data[f"Layer {layer_idx}"] = [np.nan] * seq_len
+            
+            df = pd.DataFrame(table_data, index=column_headers)
+            df = df.T  # Transpose so layers are rows and tokens are columns
+            
+            print(f"\nAttention weights from token at position {actual_listen_index} ('{tokens[actual_listen_index]}') to all tokens:")
+            print(f"Values show how much attention the listened-to token pays to each position")
+            
+            # Format the table nicely
+            pd.set_option('display.max_columns', None)
+            pd.set_option('display.width', None)
+            pd.set_option('display.max_colwidth', 15)
+            
+            print(df.round(4))
+            
+            # Also show which tokens get the most attention
+            print(f"\nTop 3 attended tokens for each layer (Head {head_idx}):")
+            for layer_idx in layers:
+                if attention_data_by_layer[layer_idx] is not None:
+                    weights = attention_data_by_layer[layer_idx]
+                    top_indices = np.argsort(weights)[-3:][::-1]  # Top 3 in descending order
+                    top_weights = weights[top_indices]
+                    
+                    top_tokens = []
+                    for idx, weight in zip(top_indices, top_weights):
+                        top_tokens.append(f"'{tokens[idx]}' (pos {idx}): {weight:.4f}")
+                    
+                    print(f"  Layer {layer_idx}: {', '.join(top_tokens)}")
+
+# %% Compare Attention Across Layers (same head)
+if len(attention_points) > 1:
+    # Group by head to compare across layers
+    heads_dict = {}
+    for layer, head in attention_points:
+        if head not in heads_dict:
+            heads_dict[head] = []
+        heads_dict[head].append(layer)
+    
+    for head_idx, layers in heads_dict.items():
+        if len(layers) > 1:
+            print(f"\nComparing attention across layers {layers} for head {head_idx}")
+            
+            # Calculate grid dimensions
+            num_layers = len(layers)
+            cols = min(3, num_layers)
+            rows = (num_layers + cols - 1) // cols
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+            if num_layers == 1:
+                axes = [axes]
+            elif rows == 1 or cols == 1:
+                axes = axes.flatten()
+            else:
+                axes = axes.flatten()
+            
+            for i, layer_idx in enumerate(layers):
+                print(f"Capturing attention for layer {layer_idx}, head {head_idx}...")
+                
+                with torch.no_grad():
+                    with ctx:
+                        with capture_attention_weights(model, layer_idx) as attention_data:
+                            logits, _ = model(x)
+                        
+                        layer_attention = attention_data['weights']
+                
+                if layer_attention is not None and i < len(axes):
+                    # Get tokens for this sequence length
+                    seq_len = layer_attention.shape[-1]
+                    display_tokens = tokens[:seq_len]
+                    
+                    # Use centralized attention plotting function
+                    plot_attention_on_axis(
+                        layer_attention,
+                        head_idx,
+                        axes[i],
+                        tokens=display_tokens,
+                        title=f'Layer {layer_idx}',
+                        lock_color_range=True,
+                        show_colorbar=True,
+                        show_labels=True
+                    )
+                else:
+                    if i < len(axes):
+                        axes[i].text(0.5, 0.5, f'Layer {layer_idx}\n(No data)', 
+                                     ha='center', va='center', transform=axes[i].transAxes)
+                        axes[i].set_title(f'Layer {layer_idx} - No Data')
+            
+            # Hide extra subplots
+            for idx in range(len(layers), len(axes)):
+                axes[idx].set_visible(False)
+            
+            plt.suptitle(f'Attention Evolution Across Layers (Head {head_idx})', fontsize=16)
+            plt.tight_layout()
+            plt.show()
+else:
+    print("No attention points found in extract_points, or only one point to compare.")
