@@ -681,7 +681,8 @@ while True:
             log_dict = {
                 "iter": iter_num,
                 "train/loss": lossf,
-                "mfu": running_mfu,
+                # keep multiplying by 100 to convert to percentage
+                "mfu": running_mfu*100,
             }
             if grad_norm is not None:
                 grad_norm_item = grad_norm.item()
