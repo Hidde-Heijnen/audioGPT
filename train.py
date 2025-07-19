@@ -266,6 +266,7 @@ model_args['shadow_auxiliary_loss'] = shadow_auxiliary_loss
 model_args['audio_alignment_lambda'] = audio_alignment_lambda
 model_args['use_sink_token'] = use_sink_token
 model_args['softmax_off_by_one'] = softmax_off_by_one
+model_args['attention_type'] = attention_type
 
 if init_from == 'scratch':
     # init a new model from scratch
