@@ -225,6 +225,7 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = create_attention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
@@ -249,7 +250,12 @@ class Block(nn.Module):
         audio_norm = self.audio_ln1(audio)
         y, audio_mixed = self.attn(x_norm, audio_norm)
         x = self.attn_resid(x, y)
-        audio = self.audio_attn_resid(audio_norm, audio_mixed)
+        if self.config.shadow_audio_residual == "normalised_residual":
+            audio = self.audio_attn_resid(audio_norm, audio_mixed)
+        elif self.config.shadow_audio_residual == "unnormalised_residual":
+            audio = self.audio_attn_resid(audio, audio_mixed)
+        else:
+            raise ValueError(f"Unknown shadow_audio_residual: {self.config.shadow_audio_residual}. Must be 'normalised_residual' or 'unnormalised_residual'")
         x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
         return x, audio
 
@@ -334,6 +340,7 @@ class GPTConfig:
     use_sink_token: bool = False
     softmax_off_by_one: bool = False
     attention_type: str = 'standard'  # 'standard', 'projected_full', 'identity_full'
+    shadow_audio_residual: str = "unnormalised_residual"  # "unnormalised_residual" or "normalised_residual"
 
 class GPT(nn.Module):
 
