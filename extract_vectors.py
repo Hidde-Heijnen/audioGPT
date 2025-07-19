@@ -32,12 +32,17 @@ from tokenizer import get_tokenizer
 # - (layer, 'after_attn', head?): after attn (per head if specified, token path)
 # - (layer, 'after_audio_attn', head?): after audio attn mix (per head before mean if specified)
 # - (layer, 'after_attn_resid'): after attn residual
+# The residual is computed after attention heads are combined, so specifying a head index doesn't make sense.
 # - (layer, 'after_audio_attn_resid'): after audio attn residual
 # - (layer, 'after_ln2'): after ln2
 # - (layer, 'after_mlp'): after mlp
 # - (layer, 'after_mlp_resid'): after mlp residual
 # - 'final_ln': final ln (token)
 # - 'audio_final_ln': final audio ln (shadow)
+
+# Grid visualization parameters
+MAX_COLUMNS = 3  # Maximum number of columns in attention visualization grids
+
 extract_points = [
     # ('wte',),
     ('w_audio',),
@@ -50,12 +55,12 @@ extract_points = [
     # (3, 'after_attn_resid'),
     # (4, 'after_attn_resid'),
     # (5, 'after_attn_resid'),
-    (0, 'after_audio_attn_resid', 2),
-    (1, 'after_audio_attn_resid', 2),
-    (2, 'after_audio_attn_resid', 2),
-    (3, 'after_audio_attn_resid', 2),
-    (4, 'after_audio_attn_resid', 2),
-    (5, 'after_audio_attn_resid', 2),
+    (0, 'after_audio_attn', 2),
+    (1, 'after_audio_attn', 2),
+    (2, 'after_audio_attn', 2),
+    (3, 'after_audio_attn', 2),
+    (4, 'after_audio_attn', 2),
+    (5, 'after_audio_attn', 2),
     # (0, 'after_mlp'),
     # (0, 'after_mlp_resid'),
     # ('final_ln',),
@@ -64,7 +69,7 @@ extract_points = [
 
 init_from = 'resume'
 # out_dir = 'out/camstories_10k_shadow_audio_run1'
-out_dir = "out/camstories_10k_shadow_audio_offbyone_run1" 
+out_dir = "out/camstories_10k_shadow_audio_offbyone_run2" 
 start = 'Frankie is very tired'
 num_samples = 1
 max_new_tokens = 10
@@ -258,11 +263,15 @@ display(Audio(concatenated, rate=rate))
 from attention_viz import capture_attention_weights, plot_attention_heatmap, plot_multi_head_attention, analyze_attention_patterns, plot_attention_on_axis
 
 # Extract attention layer/head combinations from extract_points
+# Include both individual head stages and residual stages (which show mean across heads)
 attention_points = []
 for point in extract_points:
-    if len(point) == 3 and 'after_audio_attn' in point[1]:
+    if len(point) == 3 and point[1] in ['after_attn', 'after_audio_attn']:
         layer, stage, head = point
-        attention_points.append((layer, head))
+        attention_points.append((layer, stage, head))
+    elif len(point) == 2 and 'attn_resid' in point[1]:
+        layer, stage = point
+        attention_points.append((layer, stage, 'mean'))
 
 print(f"Will visualize attention for: {attention_points}")
 
@@ -277,22 +286,26 @@ import pandas as pd
 
 print(f"\n=== Attention Weights for Token at Position {listen_index} ===")
 
-# Group attention points by head for organized output
+# Group attention points by head/stage for organized output
 heads_dict = {}
-for layer, head in attention_points:
-    if head not in heads_dict:
-        heads_dict[head] = []
-    heads_dict[head].append(layer)
+for layer, stage, head in attention_points:
+    key = f"{stage}_head{head}" if head != 'mean' else f"{stage}_mean"
+    if key not in heads_dict:
+        heads_dict[key] = []
+    heads_dict[key].append((layer, stage, head))
 
-for head_idx in sorted(heads_dict.keys()):
-    layers = sorted(heads_dict[head_idx])
-    print(f"\n--- Head {head_idx} ---")
+for group_key in sorted(heads_dict.keys()):
+    group_data = heads_dict[group_key]
+    print(f"\n--- {group_key} ---")
     
-    # Collect attention data for all layers of this head
+    # Collect attention data for all layers in this group
     attention_data_by_layer = {}
     
-    for layer_idx in layers:
-        print(f"Capturing attention for layer {layer_idx}, head {head_idx}...")
+    for layer_idx, stage, head in group_data:
+        if head == 'mean':
+            print(f"Capturing attention for layer {layer_idx} (mean across all heads)...")
+        else:
+            print(f"Capturing attention for layer {layer_idx}, head {head}...")
         
         with torch.no_grad():
             with ctx:
@@ -313,7 +326,12 @@ for head_idx in sorted(heads_dict.keys()):
             if 0 <= actual_listen_index < seq_len:
                 # Get attention weights from listen_index token to all other tokens
                 # Shape: [batch, heads, seq_len, seq_len]
-                token_attention = layer_attention[0, head_idx, actual_listen_index, :seq_len]
+                if head == 'mean':
+                    # Average across all heads for residual stages
+                    token_attention = layer_attention[0, :, actual_listen_index, :seq_len].mean(dim=0)
+                else:
+                    # Use specific head
+                    token_attention = layer_attention[0, head, actual_listen_index, :seq_len]
                 attention_data_by_layer[layer_idx] = token_attention.cpu().numpy()
             else:
                 print(f"  Warning: listen_index {listen_index} (adjusted: {actual_listen_index}) out of bounds for sequence length {seq_len}")
@@ -335,17 +353,24 @@ for head_idx in sorted(heads_dict.keys()):
             
             # Create DataFrame
             table_data = {}
-            for layer_idx in layers:
+            for layer_idx, stage, head in group_data:
                 if attention_data_by_layer[layer_idx] is not None:
-                    table_data[f"Layer {layer_idx}"] = attention_data_by_layer[layer_idx]
+                    if head == 'mean':
+                        table_data[f"Layer {layer_idx} (mean)"] = attention_data_by_layer[layer_idx]
+                    else:
+                        table_data[f"Layer {layer_idx}"] = attention_data_by_layer[layer_idx]
                 else:
-                    table_data[f"Layer {layer_idx}"] = [np.nan] * seq_len
+                    if head == 'mean':
+                        table_data[f"Layer {layer_idx} (mean)"] = [np.nan] * seq_len
+                    else:
+                        table_data[f"Layer {layer_idx}"] = [np.nan] * seq_len
             
             df = pd.DataFrame(table_data, index=column_headers)
             df = df.T  # Transpose so layers are rows and tokens are columns
             
+            stage_type = "mean across all heads" if any(h == 'mean' for _, _, h in group_data) else f"individual head"
             print(f"\nAttention weights from token at position {actual_listen_index} ('{tokens[actual_listen_index]}') to all tokens:")
-            print(f"Values show how much attention the listened-to token pays to each position")
+            print(f"Values show how much attention the listened-to token pays to each position ({stage_type})")
             
             # Format the table nicely
             pd.set_option('display.max_columns', None)
@@ -355,8 +380,8 @@ for head_idx in sorted(heads_dict.keys()):
             print(df.round(4))
             
             # Also show which tokens get the most attention
-            print(f"\nTop 3 attended tokens for each layer (Head {head_idx}):")
-            for layer_idx in layers:
+            print(f"\nTop 3 attended tokens for each layer ({group_key}):")
+            for layer_idx, stage, head in group_data:
                 if attention_data_by_layer[layer_idx] is not None:
                     weights = attention_data_by_layer[layer_idx]
                     top_indices = np.argsort(weights)[-3:][::-1]  # Top 3 in descending order
@@ -366,24 +391,30 @@ for head_idx in sorted(heads_dict.keys()):
                     for idx, weight in zip(top_indices, top_weights):
                         top_tokens.append(f"'{tokens[idx]}' (pos {idx}): {weight:.4f}")
                     
-                    print(f"  Layer {layer_idx}: {', '.join(top_tokens)}")
+                    layer_label = f"Layer {layer_idx} (mean)" if head == 'mean' else f"Layer {layer_idx}"
+                    print(f"  {layer_label}: {', '.join(top_tokens)}")
 
-# %% Compare Attention Across Layers (same head)
+# %% Compare Attention Across Layers (same head/stage)
 if len(attention_points) > 1:
-    # Group by head to compare across layers
-    heads_dict = {}
-    for layer, head in attention_points:
-        if head not in heads_dict:
-            heads_dict[head] = []
-        heads_dict[head].append(layer)
+    # Group by stage and head to compare across layers
+    comparison_groups = {}
+    for layer, stage, head in attention_points:
+        key = f"{stage}_head{head}" if head != 'mean' else f"{stage}_mean"
+        if key not in comparison_groups:
+            comparison_groups[key] = []
+        comparison_groups[key].append((layer, stage, head))
     
-    for head_idx, layers in heads_dict.items():
-        if len(layers) > 1:
-            print(f"\nComparing attention across layers {layers} for head {head_idx}")
+    for group_key, group_data in comparison_groups.items():
+        if len(group_data) > 1:
+            layers = [item[0] for item in group_data]
+            stage = group_data[0][1]
+            head = group_data[0][2]
+            
+            print(f"\nComparing attention across layers {layers} for {group_key}")
             
             # Calculate grid dimensions
             num_layers = len(layers)
-            cols = min(3, num_layers)
+            cols = min(MAX_COLUMNS, num_layers)
             rows = (num_layers + cols - 1) // cols
             
             fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
@@ -394,8 +425,11 @@ if len(attention_points) > 1:
             else:
                 axes = axes.flatten()
             
-            for i, layer_idx in enumerate(layers):
-                print(f"Capturing attention for layer {layer_idx}, head {head_idx}...")
+            for i, (layer_idx, stage, head) in enumerate(group_data):
+                if head == 'mean':
+                    print(f"Capturing attention for layer {layer_idx} (mean across all heads)...")
+                else:
+                    print(f"Capturing attention for layer {layer_idx}, head {head}...")
                 
                 with torch.no_grad():
                     with ctx:
@@ -409,13 +443,23 @@ if len(attention_points) > 1:
                     seq_len = layer_attention.shape[-1]
                     display_tokens = tokens[:seq_len]
                     
+                    if head == 'mean':
+                        # Average across all heads for visualization
+                        averaged_attention = layer_attention.mean(dim=1, keepdim=True)
+                        plot_head_idx = 0  # Use index 0 for the averaged attention
+                        title_suffix = " (mean)"
+                    else:
+                        averaged_attention = layer_attention
+                        plot_head_idx = head
+                        title_suffix = ""
+                    
                     # Use centralized attention plotting function
                     plot_attention_on_axis(
-                        layer_attention,
-                        head_idx,
+                        averaged_attention,
+                        plot_head_idx,
                         axes[i],
                         tokens=display_tokens,
-                        title=f'Layer {layer_idx}',
+                        title=f'Layer {layer_idx}{title_suffix}',
                         lock_color_range=True,
                         show_colorbar=True,
                         show_labels=True
@@ -427,10 +471,10 @@ if len(attention_points) > 1:
                         axes[i].set_title(f'Layer {layer_idx} - No Data')
             
             # Hide extra subplots
-            for idx in range(len(layers), len(axes)):
+            for idx in range(len(group_data), len(axes)):
                 axes[idx].set_visible(False)
             
-            plt.suptitle(f'Attention Evolution Across Layers (Head {head_idx})', fontsize=16)
+            plt.suptitle(f'Attention Evolution Across Layers ({group_key})', fontsize=16)
             plt.tight_layout()
             plt.show()
 else:

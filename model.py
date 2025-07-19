@@ -132,7 +132,7 @@ class CausalSelfAttention(nn.Module):
         audio_norm = audio_norm.unsqueeze(1)  # (B, 1, T, Da)
         audio_mixed = torch.matmul(att_drop, audio_norm)  # (B, nh, T, T) @ (B, 1, T, Da) -> (B, nh, T, Da)
         audio_mixed = self.head_audio_out(audio_mixed)
-        audio_mixed = self.audio_mix_mean(audio_mixed.mean(dim=1))  # average over heads (B, T, Da)
+        audio_mixed = self.audio_mix_mean(audio_mixed.mean(dim=1))  # average over heads (B, T, Da) does it make sense if this is the average?
 
         # output projection for y
         y = self.resid_dropout(self.c_proj(y))
@@ -194,6 +194,61 @@ class Block(nn.Module):
         x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
         return x, audio
 
+class ShadowAudioLoss(nn.Module):
+    """
+    Handles different types of auxiliary losses for shadow audio transformers.
+    
+    Available loss types:
+    - "none": No auxiliary loss (just cross entropy)
+    - "expected": Expected audio loss using softmax probabilities 
+    - "target": Target audio loss using embedding weights directly
+    """
+    
+    def __init__(self, loss_type="none", lambda_weight=1.0, use_sink_token=False):
+        super().__init__()
+        self.lambda_weight = lambda_weight
+        self.use_sink_token = use_sink_token
+        
+        # Assign the correct forward method once during initialization to avoid runtime checks
+        if loss_type == "none":
+            self.forward = self._forward_none
+        elif loss_type == "expected":
+            self.forward = self._forward_expected
+        elif loss_type == "target":
+            self.forward = self._forward_target
+        else:
+            raise ValueError(f"Invalid loss_type: {loss_type}. Must be one of: 'none', 'expected', 'target'")
+    
+    def _forward_none(self, audio, targets, logits, W_audio):
+        """No auxiliary loss - returns zero."""
+        return torch.tensor(0.0, device=audio.device, dtype=audio.dtype)
+    
+    def _forward_expected(self, audio, targets, logits, W_audio):
+        """Expected audio loss using softmax probabilities."""
+        # Expected audio loss using softmax probabilities
+        probs = F.softmax(logits, dim=-1)  # (B, T, V)
+        expected_audio = probs @ W_audio  # (B, T, Da)
+        squared_diff = (audio - expected_audio) ** 2
+        if self.use_sink_token:
+            mask = torch.ones_like(squared_diff)
+            mask[:, 0] = 0.0  # Mask t=0 (sink position)
+            squared_diff = squared_diff * mask
+        aux_loss = self.lambda_weight * squared_diff.mean()
+        return aux_loss
+    
+    def _forward_target(self, audio, targets, logits, W_audio):
+        """Target audio loss using embedding weights directly."""
+        # Create mask for valid positions
+        valid_mask = (targets != -1).unsqueeze(-1).expand_as(audio).float()
+        if self.use_sink_token:
+            valid_mask[:, 0] = 0.0  # Mask t=0 (sink position)
+        
+        # Target audio loss using embedding weights directly
+        target_audio = W_audio[targets.clamp(0)]  # Clamp to avoid index error on -1, but mask will ignore
+        squared_diff = (audio - target_audio) ** 2
+        aux_loss = self.lambda_weight * (squared_diff * valid_mask).sum() / valid_mask.sum().clamp(min=1)
+        return aux_loss
+
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -214,8 +269,8 @@ class GPTConfig:
     # --- new fields for audio channel ---
     audio_dim: int = 0  # if >0, enable audio shadow channel with this dimension
     transformer_type: str = 'normal_transformer'  # 'normal_transformer' | 'shadow_audio'
-    # --- new fields for audio alignment loss ---
-    audio_alignment_loss: bool = False
+    # --- new fields for shadow auxiliary loss ---
+    shadow_auxiliary_loss: str = "none"  # "none" | "expected" | "target"
     audio_alignment_lambda: float = 1.0
     use_sink_token: bool = False
     softmax_off_by_one: bool = False
@@ -277,6 +332,11 @@ class GPT(nn.Module):
         if enable_audio:
             self.transformer.w_audio = nn.Embedding(config.vocab_size, config.audio_dim)
             self.audio_ln_f = LayerNorm(config.audio_dim, bias=config.bias)
+            self.shadow_audio_loss = ShadowAudioLoss(
+                loss_type=config.shadow_auxiliary_loss,
+                lambda_weight=config.audio_alignment_lambda,
+                use_sink_token=config.use_sink_token
+            )
             self.forward = self._forward_with_audio
         else:
             self.forward = self._forward_without_audio
@@ -383,25 +443,9 @@ class GPT(nn.Module):
             h = self._extract_token_slice(x)
             logits = F.linear(h, self.lm_head_weight)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-            # if self.config.audio_alignment_loss:
-            #     probs = F.softmax(logits, dim=-1)  # (B, T, V)
-            #     W_audio = self.transformer.w_audio.weight  # (V, Da)
-            #     expected_audio = probs @ W_audio  # (B, T, Da)
-            #     squared_diff = (audio - expected_audio) ** 2
-            #     if self.config.use_sink_token:
-            #         mask = torch.ones_like(squared_diff)
-            #         mask[:, 0] = 0.0  # Mask t=0 (sink position)
-            #         squared_diff = squared_diff * mask
-            #     aux_loss = self.config.audio_alignment_lambda * squared_diff.mean()
-            #     loss = loss + aux_loss
-            if self.config.audio_alignment_loss:
-                valid_mask = (targets != -1).unsqueeze(-1).expand_as(audio).float()
-                if self.config.use_sink_token:
-                    valid_mask[:, 0] = 0.0  # Mask t=0 (sink position) to avoid zero-vs-real penalty
+            if self.config.shadow_auxiliary_loss != "none":
                 W_audio = self.transformer.w_audio.weight  # (V, Da)
-                target_audio = W_audio[targets.clamp(0)]  # Clamp to avoid index error on -1, but mask will ignore
-                squared_diff = (audio - target_audio) ** 2
-                aux_loss = self.config.audio_alignment_lambda * (squared_diff * valid_mask).sum() / valid_mask.sum().clamp(min=1)
+                aux_loss = self.shadow_audio_loss(audio, targets, logits, W_audio)
                 loss = loss + aux_loss
         else:
             x_last = x[:, [-1], :]

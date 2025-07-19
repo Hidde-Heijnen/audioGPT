@@ -83,8 +83,8 @@ audio_dim = 0 # audio embedding dimension for shadow audio transformers (automat
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
-# audio alignment loss
-audio_alignment_loss = False # only used for shadow audio transformers
+# shadow auxiliary loss
+shadow_auxiliary_loss = "none" # "none" | "expected" | "target" - only used for shadow audio transformers
 audio_alignment_lambda = 1.0 # how much to weight the audio alignment loss
 use_sink_token = False
 softmax_off_by_one = False
@@ -261,7 +261,7 @@ for _k in ("posenc_type", "embed_dim_token", "extra_dim", "posenc_scale"):
 # Audio options
 model_args['audio_dim'] = detected_audio_dim
 model_args['transformer_type'] = transformer_type
-model_args['audio_alignment_loss'] = audio_alignment_loss
+model_args['shadow_auxiliary_loss'] = shadow_auxiliary_loss
 model_args['audio_alignment_lambda'] = audio_alignment_lambda
 model_args['use_sink_token'] = use_sink_token
 model_args['softmax_off_by_one'] = softmax_off_by_one
@@ -283,7 +283,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'audio_alignment_loss', 'audio_alignment_lambda']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda']:
         model_args[k] = checkpoint_model_args[k]
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -307,7 +307,7 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'audio_alignment_loss', 'audio_alignment_lambda']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda']:
         model_args[k] = getattr(model.config, k)
         # Update config for wandb logging if key exists in config
         if k in config:

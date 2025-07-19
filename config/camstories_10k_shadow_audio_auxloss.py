@@ -17,7 +17,7 @@ batch_size = 64
 # --- Shadow Audio Transformer ---
 transformer_type = 'shadow_audio'  # enable shadow audio transformer
 shadow_audio_col = '4096_vec'      # column name for locked audio embeddings
-audio_alignment_loss = True
+shadow_auxiliary_loss = "target"   # "none" | "expected" | "target"
 audio_alignment_lambda = 1.0
 # audio_dim will be automatically detected from parquet file
 
