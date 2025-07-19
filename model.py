@@ -161,13 +161,15 @@ class StandardCausalSelfAttention(CausalSelfAttention):
     def _get_qkv(self, x):
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
-        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)  # Use -1 for B, T
-        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
-        v = v.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        B, T, C = x.size()
+        q = q.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.hs).transpose(1, 2)
         return q, k, v
 
     def _combine_heads(self, y):
-        return y.transpose(1, 2).contiguous().view(-1, -1, self.n_embd)  # B, T, C
+        B, nh, T, hs = y.size()
+        return y.transpose(1, 2).contiguous().view(B, T, self.n_embd)
 
 class ProjectedFullCausalSelfAttention(CausalSelfAttention):
     def __init__(self, config):
@@ -179,9 +181,10 @@ class ProjectedFullCausalSelfAttention(CausalSelfAttention):
         qk = self.c_qk(x)
         q, k = qk.split(self.n_embd, dim=2)
         v = self.c_v(x)
-        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
-        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
-        v = v.view(-1, -1, self.n_head, self.n_embd).transpose(1, 2)
+        B, T, C = x.size()
+        q = q.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.n_embd).transpose(1, 2)
         return q, k, v
 
     def _combine_heads(self, y):
@@ -196,9 +199,10 @@ class IdentityFullCausalSelfAttention(CausalSelfAttention):
         qk = self.c_qk(x)
         q, k = qk.split(self.n_embd, dim=2)
         v = x
-        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
-        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
-        v = v.unsqueeze(1).expand(-1, self.n_head, -1, -1)  # (B, nh, T, C)
+        B, T, C = x.size()
+        q = q.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(B, T, self.n_head, self.hs).transpose(1, 2)
+        v = v.unsqueeze(1).expand(B, self.n_head, T, C)  # (B, nh, T, C)
         return q, k, v
 
     def _combine_heads(self, y):
@@ -257,6 +261,45 @@ class Block(nn.Module):
         else:
             raise ValueError(f"Unknown shadow_audio_residual: {self.config.shadow_audio_residual}. Must be 'normalised_residual' or 'unnormalised_residual'")
         x = self.mlp_resid(x, self.mlp(self.ln_2(x)))
+        return x, audio
+
+class AttentionOnlyBlock(nn.Module):
+    """
+    Block that only applies attention, skipping MLP and its layer norm.
+    Used when disable_last_mlp is True for the final transformer block.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = create_attention(config)
+        self.attn_resid = ResidualAdd()
+        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        if enable_audio:
+            self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
+            self.audio_attn_resid = ResidualAdd()
+            self.forward = self._forward_with_audio
+        else:
+            self.forward = self._forward_without_audio
+
+    def _forward_without_audio(self, x):
+        x = self.attn_resid(x, self.attn(self.ln_1(x)))
+        # Skip MLP and ln_2
+        return x
+
+    def _forward_with_audio(self, x, audio):
+        x_norm = self.ln_1(x)
+        audio_norm = self.audio_ln1(audio)
+        y, audio_mixed = self.attn(x_norm, audio_norm)
+        x = self.attn_resid(x, y)
+        if self.config.shadow_audio_residual == "normalised_residual":
+            audio = self.audio_attn_resid(audio_norm, audio_mixed)
+        elif self.config.shadow_audio_residual == "unnormalised_residual":
+            audio = self.audio_attn_resid(audio, audio_mixed)
+        else:
+            raise ValueError(f"Unknown shadow_audio_residual: {self.config.shadow_audio_residual}. Must be 'normalised_residual' or 'unnormalised_residual'")
+        # Skip MLP
         return x, audio
 
 class ShadowAudioLoss(nn.Module):
@@ -341,6 +384,7 @@ class GPTConfig:
     softmax_off_by_one: bool = False
     attention_type: str = 'standard'  # 'standard', 'projected_full', 'identity_full'
     shadow_audio_residual: str = "unnormalised_residual"  # "unnormalised_residual" or "normalised_residual"
+    disable_last_mlp: bool = False  # if True, skip MLP in the final transformer block
 
 class GPT(nn.Module):
 
@@ -379,11 +423,20 @@ class GPT(nn.Module):
             self.pos_add = ResidualAdd()
 
         # --- transformer body (aliases for backward compat) ---
+        # Create transformer blocks, with optional attention-only last block
+        blocks = []
+        for i in range(config.n_layer):
+            if i == config.n_layer - 1 and config.disable_last_mlp:
+                # Use attention-only block for the last layer
+                blocks.append(AttentionOnlyBlock(config))
+            else:
+                blocks.append(Block(config))
+        
         self.transformer = nn.ModuleDict(dict(
             wte = wte,  # the canonical token embedding module
             wpe = pos_emb if pos_emb is not None else nn.Embedding(1, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList(blocks),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
 
