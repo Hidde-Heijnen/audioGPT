@@ -51,15 +51,14 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.hs = self.n_embd // self.n_head
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.head_out = nn.Identity() # These are just so we can track the vectors with hooks
@@ -67,12 +66,14 @@ class CausalSelfAttention(nn.Module):
             self.head_audio_out = nn.Identity() # These are just so we can track the vectors with hooks
             self.audio_mix_mean = nn.Identity() # These are just so we can track the vectors with hooks
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if config.softmax_off_by_one and self.flash:
+        if config.softmax_off_by_one:
             self.flash = False
             print("Disabling flash attention because softmax_off_by_one is enabled")
+        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
+            self.flash = False # use manual attention for audio case to get att weights
         self.my_softmax = OffByOneSoftmax() if config.softmax_off_by_one else StandardSoftmax()
-        if not self.flash or config.transformer_type == 'shadow_audio': # we do manual attention for shadow transformer. 
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0 or non-shadow mode")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
@@ -81,28 +82,30 @@ class CausalSelfAttention(nn.Module):
         else:
             self.forward = self._forward_without_audio
 
+    def _get_qkv(self, x):
+        raise NotImplementedError("Subclasses must implement _get_qkv")
+
+    def _combine_heads(self, y):
+        raise NotImplementedError("Subclasses must implement _combine_heads")
+
     def _forward_without_audio(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q, k, v = self._get_qkv(x)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # causal self-attention
         if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            # manual attention implementation
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.hs))
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = self.my_softmax(att)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            att_drop = self.attn_dropout(att) # dropout often disabled. 
+            y = att_drop @ v
         y = self.head_out(y)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+
+        y = self._combine_heads(y)
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -111,22 +114,17 @@ class CausalSelfAttention(nn.Module):
     def _forward_with_audio(self, x, audio_norm):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q, k, v = self._get_qkv(x)
 
-        # Always use manual attention implementation for audio case since we need attention weights
-        # for audio mixing. Flash attention doesn't expose attention weights, so we can't use it.
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # Always use manual attention for audio case to get att weights
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.hs))
         att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
         att = self.my_softmax(att)
         att_drop = self.attn_dropout(att)
-        y = att_drop @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = att_drop @ v
         y = self.head_out(y)
 
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        y = self._combine_heads(y)
 
         # audio mixing using the same attention weights
         audio_norm = audio_norm.unsqueeze(1)  # (B, 1, T, Da)
@@ -155,6 +153,67 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class StandardCausalSelfAttention(CausalSelfAttention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=config.bias)
+
+    def _get_qkv(self, x):
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)  # Use -1 for B, T
+        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        return q, k, v
+
+    def _combine_heads(self, y):
+        return y.transpose(1, 2).contiguous().view(-1, -1, self.n_embd)  # B, T, C
+
+class ProjectedFullCausalSelfAttention(CausalSelfAttention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.c_qk = nn.Linear(self.n_embd, 2 * self.n_embd, bias=config.bias)
+        self.c_v = nn.Linear(self.n_embd, self.n_head * self.n_embd, bias=config.bias)
+
+    def _get_qkv(self, x):
+        qk = self.c_qk(x)
+        q, k = qk.split(self.n_embd, dim=2)
+        v = self.c_v(x)
+        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(-1, -1, self.n_head, self.n_embd).transpose(1, 2)
+        return q, k, v
+
+    def _combine_heads(self, y):
+        return y.mean(dim=1)
+
+class IdentityFullCausalSelfAttention(CausalSelfAttention):
+    def __init__(self, config):
+        super().__init__(config)
+        self.c_qk = nn.Linear(self.n_embd, 2 * self.n_embd, bias=config.bias)
+
+    def _get_qkv(self, x):
+        qk = self.c_qk(x)
+        q, k = qk.split(self.n_embd, dim=2)
+        v = x
+        q = q.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(-1, -1, self.n_head, self.hs).transpose(1, 2)
+        v = v.unsqueeze(1).expand(-1, self.n_head, -1, -1)  # (B, nh, T, C)
+        return q, k, v
+
+    def _combine_heads(self, y):
+        return y.mean(dim=1)
+
+def create_attention(config):
+    if config.attention_type == 'standard':
+        return StandardCausalSelfAttention(config)
+    elif config.attention_type == 'projected_full':
+        return ProjectedFullCausalSelfAttention(config)
+    elif config.attention_type == 'identity_full':
+        return IdentityFullCausalSelfAttention(config)
+    else:
+        raise ValueError(f"Unknown attention_type: {config.attention_type}")
+
 class ResidualAdd(nn.Module):
     def __init__(self):
         super().__init__()
@@ -167,7 +226,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = create_attention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
         self.attn_resid = ResidualAdd()
@@ -274,6 +333,7 @@ class GPTConfig:
     audio_alignment_lambda: float = 1.0
     use_sink_token: bool = False
     softmax_off_by_one: bool = False
+    attention_type: str = 'standard'  # 'standard', 'projected_full', 'identity_full'
 
 class GPT(nn.Module):
 
