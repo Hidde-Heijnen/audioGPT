@@ -78,7 +78,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 freeze_embeddings = False # whether to freeze embedding layers
 locked_embeddings = None # column name in parquet file to use for locked embeddings in the main transformer (non-shadow part) (e.g. "4096_vec"), or None to disable
 shadow_audio_col = None  # None to disable, or string column name for locked audio embeddings
-transformer_type = 'normal_transformer'  # 'normal_transformer' or 'shadow_audio'
+transformer_type = 'normal_transformer'  # 'normal_transformer', 'shadow_audio', 'attention_only', or 'attention_only_shadow'
 audio_dim = 0 # audio embedding dimension for shadow audio transformers (automatically detected if 0 and shadow_audio_col is not None )
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
@@ -229,7 +229,7 @@ if locked_embeddings is not None:
     config['embed_dim_token'] = embed_dim_token
 
 # Initialize audio dimension
-if shadow_audio_col is not None and transformer_type == 'shadow_audio':
+if shadow_audio_col is not None and transformer_type in ['shadow_audio', 'attention_only_shadow']:
     if shadow_audio_col not in df.columns:
         raise ValueError(f"Column '{shadow_audio_col}' not found in parquet file. Available columns: {list(df.columns)}")
     
@@ -245,8 +245,8 @@ if shadow_audio_col is not None and transformer_type == 'shadow_audio':
     detected_audio_dim = dim1
     print(f"Detected audio_dim={detected_audio_dim} from column '{shadow_audio_col}'")
     config['audio_dim'] = detected_audio_dim
-elif shadow_audio_col is None and transformer_type == 'shadow_audio':
-    raise ValueError("shadow_audio_col required for shadow_audio transformer_type")
+elif shadow_audio_col is None and transformer_type in ['shadow_audio', 'attention_only_shadow']:
+    raise ValueError("shadow_audio_col required for shadow_audio and attention_only_shadow transformer_types")
 else:
     detected_audio_dim = 0
     config['audio_dim'] = detected_audio_dim

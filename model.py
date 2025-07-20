@@ -408,7 +408,7 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        if config.transformer_type not in ['normal_transformer', 'shadow_audio']:
+        if config.transformer_type not in ['normal_transformer', 'shadow_audio', 'attention_only', 'attention_only_shadow']:
             raise ValueError(f"Unknown transformer_type: {config.transformer_type}")
 
         # --- handle derived n_embd for zeropad ---
@@ -440,7 +440,10 @@ class GPT(nn.Module):
         # Create transformer blocks, with optional attention-only last block
         blocks = []
         for i in range(config.n_layer):
-            if i == config.n_layer - 1 and config.disable_last_mlp:
+            if config.transformer_type in ['attention_only', 'attention_only_shadow']:
+                # Use attention-only blocks for all layers
+                blocks.append(AttentionOnlyBlock(config))
+            elif i == config.n_layer - 1 and config.disable_last_mlp:
                 # Use attention-only block for the last layer
                 blocks.append(AttentionOnlyBlock(config))
             else:
@@ -462,7 +465,7 @@ class GPT(nn.Module):
             for p in self.transformer.wpe.parameters():
                 p.requires_grad = False
 
-        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        enable_audio = config.transformer_type in ['shadow_audio', 'attention_only_shadow'] and config.audio_dim > 0
         if enable_audio:
             self.transformer.w_audio = nn.Embedding(config.vocab_size, config.audio_dim)
             self.audio_ln_f = LayerNorm(config.audio_dim, bias=config.bias)
