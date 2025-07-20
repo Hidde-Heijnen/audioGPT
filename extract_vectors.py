@@ -69,7 +69,7 @@ extract_points = [
 
 init_from = 'resume'
 # out_dir = 'out/camstories_10k_shadow_audio_run1'
-out_dir = "out/camstories_10k_shadow_audio_offbyone_run2" 
+out_dir = "out/shadow_audio/cs_10k_shadow_offbyone_run2" 
 start = 'Frankie is very tired'
 num_samples = 1
 max_new_tokens = 10

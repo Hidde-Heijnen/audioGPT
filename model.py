@@ -27,12 +27,26 @@ class OffByOneSoftmax(nn.Module):
         super().__init__()
 
     def forward(self, x):
-        max_x, _ = torch.max(x, dim=-1, keepdim=True)
-        shifted_x = x - max_x
+        # More numerically stable implementation of off-by-one softmax
+        # Computes: p_i = exp(x_i) / (sum_j exp(x_j) + 1)
+        
+        # Use log-sum-exp trick for numerical stability
+        # First, find the maximum for shifting
+        max_x = torch.max(x, dim=-1, keepdim=True)[0]
+        
+        # Compare max logit with 0 (the implicit class logit)
+        max_with_implicit = torch.maximum(max_x, torch.zeros_like(max_x))
+        
+        # Shift all logits by the true maximum (including implicit 0)
+        shifted_x = x - max_with_implicit
+        shifted_implicit = 0.0 - max_with_implicit
+        
+        # Compute exponentials (now numerically stable)
         exp_x = torch.exp(shifted_x)
-        sum_exp = exp_x.sum(dim=-1, keepdim=True)
-        implicit = torch.exp(-max_x)
-        denom = sum_exp + implicit
+        exp_implicit = torch.exp(shifted_implicit)
+        
+        # Sum and normalize
+        denom = exp_x.sum(dim=-1, keepdim=True) + exp_implicit
         return exp_x / denom
 
 class LayerNorm(nn.Module):

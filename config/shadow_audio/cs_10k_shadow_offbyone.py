@@ -1,6 +1,6 @@
 # train a shadow audio model with locked audio embeddings from parquet file + off-by-one softmax
 
-out_dir = 'out/camstories_10k_shadow_audio_offbyone_run3'
+out_dir = 'out/shadow_audio/cs_10k_shadow_offbyone_run2'
 eval_interval = 500        # regular eval interval after 1000 iterations
 early_eval_interval = 100  # eval interval for first 1000 iterations
 eval_iters = 100
@@ -21,6 +21,8 @@ shadow_audio_col = '4096_vec'      # column name for locked audio embeddings
 
 # --- Off-by-one Softmax ---
 softmax_off_by_one = True          # enable off-by-one softmax mitigation
+shadow_audio_residual = "normalised_residual"  # "unnormalised_residual" or "normalised_residual"
+shadow_auxiliary_loss = "target" # "none" | "expected" | "target"
 
 # --- Locked Embeddings ---
 # locked_embeddings = '4096_vec'  # use 4096-dimensional embeddings from parquet otherwise comment out. 

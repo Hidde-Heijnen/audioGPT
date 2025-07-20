@@ -88,7 +88,7 @@ shadow_auxiliary_loss = "none" # "none" | "expected" | "target" - only used for 
 audio_alignment_lambda = 1.0 # how much to weight the audio alignment loss
 use_sink_token = False
 softmax_off_by_one = False
-attention_type = 'standard' 
+attention_type = 'standard' # 'standard', 'projected_full', 'identity_full'
 shadow_audio_residual = "unnormalised_residual"  # "unnormalised_residual" or "normalised_residual"
 disable_last_mlp = False  # if True, skip MLP in the final transformer block
 # -----------------------------------------------------------------------------
