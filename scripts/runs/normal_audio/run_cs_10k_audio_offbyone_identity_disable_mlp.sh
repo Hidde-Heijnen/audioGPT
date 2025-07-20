@@ -37,6 +37,10 @@ python train.py config/normal_audio/cs_10k_audio.py \
     --out_dir=out/normal_audio/cs_10k_audio_offbyone_identity_disable_mlp \
     --softmax_off_by_one=True \
     --attention_type=identity_full \
-    --disable_last_mlp=True
+    --disable_last_mlp=True \
+    --learning_rate=3e-4 \
+    --min_lr=3e-5 \
+    --warmup_iters=1500 \
+    --grad_clip=0.5
 
 echo "[$(date)] finished" 

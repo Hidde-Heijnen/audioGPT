@@ -35,6 +35,10 @@ python train.py config/normal_audio/cs_10k_audio.py \
     --wandb_log=True \
     --wandb_run_name=cs-10k-normal-audio-offbyone \
     --out_dir=out/normal_audio/cs_10k_audio_offbyone \
-    --softmax_off_by_one=True
+    --softmax_off_by_one=True \
+    --learning_rate=3e-4 \
+    --min_lr=3e-5 \
+    --warmup_iters=1500 \
+    --grad_clip=0.5
 
 echo "[$(date)] finished" 
