@@ -45,7 +45,7 @@ MAX_COLUMNS = 3  # Maximum number of columns in attention visualization grids
 
 extract_points = [
     # ('wte',),
-    ('w_audio',),
+    # ('w_audio',),
     # ('after_posenc',),
     # (0, 'after_attn', 0),  # Layer 0, after attn token, head 0
     # (0, 'after_audio_attn', 0),  # Layer 0, after audio attn, head 0
@@ -55,22 +55,23 @@ extract_points = [
     # (3, 'after_attn_resid'),
     # (4, 'after_attn_resid'),
     # (5, 'after_attn_resid'),
-    (0, 'after_audio_attn', 2),
-    (1, 'after_audio_attn', 2),
-    (2, 'after_audio_attn', 2),
-    (3, 'after_audio_attn', 2),
-    (4, 'after_audio_attn', 2),
-    (5, 'after_audio_attn', 2),
+    (0, 'after_attn', 6),
+    (1, 'after_attn', 6),
+    (2, 'after_attn', 6),
+    (3, 'after_attn', 6),
+    (4, 'after_attn', 6),
+    (5, 'after_attn', 6),
     # (0, 'after_mlp'),
     # (0, 'after_mlp_resid'),
-    # ('final_ln',),
-    ('audio_final_ln',)
+    ('final_ln',),
+    # ('audio_final_ln',)
 ]
 
 init_from = 'resume'
 # out_dir = 'out/camstories_10k_shadow_audio_run1'
-out_dir = "out/shadow_audio/cs_10k_shadow_offbyone_run2" 
-start = 'Frankie is very tired'
+# out_dir = "out/shadow_audio/cs_10k_shadow_offbyone_run2" 
+out_dir = "out/normal_audio/cs_10k_audio"
+start = "Alex kicked the ball away"
 num_samples = 1
 max_new_tokens = 10
 temperature = 0.8
@@ -109,6 +110,16 @@ for k, v in list(state_dict.items()):
 model.load_state_dict(state_dict)
 model.eval()
 model.to(device)
+
+# Disable flash attention to enable attention weight capture for visualization
+for block in model.transformer.h:
+    if hasattr(block.attn, 'flash') and block.attn.flash:
+        block.attn.flash = False
+        # Create causal mask if it doesn't exist (needed for manual attention)
+        if not hasattr(block.attn, 'bias'):
+            block.attn.register_buffer("bias", torch.tril(torch.ones(gptconf.block_size, gptconf.block_size))
+                                             .view(1, 1, gptconf.block_size, gptconf.block_size))
+print("Disabled flash attention for attention visualization")
 
 use_sink_token = checkpoint['model_args'].get('use_sink_token', False)
 
@@ -170,6 +181,41 @@ print(decode(y[0].tolist()))
 
 # %% Audio Playback
 from IPython.display import Audio, display
+
+def print_attention_matrix(attention_weights, layer_idx, stage, head, tokens=None):
+    """Print attention weights in the specified 2D array format"""
+    if attention_weights is None:
+        return
+    
+    # Get the attention matrix for the specified head
+    if head == 'mean':
+        # Average across all heads
+        att_matrix = attention_weights[0, :, :, :].mean(dim=0).cpu().numpy()
+        head_label = "mean across all heads"
+    else:
+        # Use specific head
+        att_matrix = attention_weights[0, head, :, :].cpu().numpy()
+        head_label = f"head {head}"
+    
+    seq_len = att_matrix.shape[0]
+    
+    print(f"\n--- Full Attention Matrix: Layer {layer_idx}, {stage}, {head_label} ---")
+    if tokens:
+        print(f"Tokens: {tokens[:seq_len]}")
+    
+    print("(")
+    for i in range(seq_len):
+        row_str = "  ("
+        for j in range(seq_len):
+            row_str += f"{att_matrix[i, j]:.2f}"
+            if j < seq_len - 1:
+                row_str += ", "
+        row_str += ")"
+        if i < seq_len - 1:
+            row_str += ","
+        print(row_str)
+    print(")")
+    print()
 
 rate = 8000  # From dataset prep: resampled to 8000 Hz
 spacing_duration = 1.0
@@ -314,6 +360,9 @@ for group_key in sorted(heads_dict.keys()):
                 
                 layer_attention = attention_data['weights']
         
+        # Print full attention matrix in 2D array format
+        print_attention_matrix(layer_attention, layer_idx, stage, head, tokens)
+        
         if layer_attention is not None:
             # Extract attention weights for the specific token at listen_index
             seq_len = layer_attention.shape[-1]
@@ -417,7 +466,7 @@ if len(attention_points) > 1:
             cols = min(MAX_COLUMNS, num_layers)
             rows = (num_layers + cols - 1) // cols
             
-            fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows))
+            fig, axes = plt.subplots(rows, cols, figsize=(10*cols, 8*rows))
             if num_layers == 1:
                 axes = [axes]
             elif rows == 1 or cols == 1:
@@ -437,6 +486,9 @@ if len(attention_points) > 1:
                             logits, _ = model(x)
                         
                         layer_attention = attention_data['weights']
+                
+                # Print full attention matrix in 2D array format
+                print_attention_matrix(layer_attention, layer_idx, stage, head, tokens)
                 
                 if layer_attention is not None and i < len(axes):
                     # Get tokens for this sequence length
@@ -474,7 +526,7 @@ if len(attention_points) > 1:
             for idx in range(len(group_data), len(axes)):
                 axes[idx].set_visible(False)
             
-            plt.suptitle(f'Attention Evolution Across Layers ({group_key})', fontsize=16)
+            plt.suptitle(f'Attention Evolution Across Layers ({group_key})', fontsize=30)
             plt.tight_layout()
             plt.show()
 else:

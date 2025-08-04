@@ -1,5 +1,6 @@
 # Attention Visualization Tool
 
+import math
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -70,19 +71,23 @@ def modify_attention_for_capture(model, layer_idx):
     captured_attention = {'weights': None}
     
     def forward_with_capture(*args, **kwargs):
-        if hasattr(target_layer, '_forward_with_audio'):
+        # Check if this is actually a shadow audio model by checking the model config
+        # and the number of arguments passed
+        is_shadow_audio = (hasattr(model, 'config') and 
+                          model.config.transformer_type == 'shadow_audio' and 
+                          model.config.audio_dim > 0 and 
+                          len(args) >= 2)
+        
+        if is_shadow_audio:
             # Shadow audio model
             x, audio_norm = args[0], args[1]
             B, T, C = x.size()
             
-            # Replicate the attention computation to capture weights
-            q, k, v = target_layer.c_attn(x).split(target_layer.n_embd, dim=2)
-            k = k.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
-            q = q.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
-            v = v.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
+            # Get QKV based on attention type
+            q, k, v = target_layer._get_qkv(x)
             
             # Compute attention weights
-            att = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1) ** 0.5))
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(target_layer.hs))
             att = att.masked_fill(target_layer.bias[:,:,:T,:T] == 0, float('-inf'))
             att = target_layer.my_softmax(att)
             
@@ -96,11 +101,8 @@ def modify_attention_for_capture(model, layer_idx):
             x = args[0]
             B, T, C = x.size()
             
-            # Replicate attention computation
-            q, k, v = target_layer.c_attn(x).split(target_layer.n_embd, dim=2)
-            k = k.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
-            q = q.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
-            v = v.view(B, T, target_layer.n_head, C // target_layer.n_head).transpose(1, 2)
+            # Get QKV based on attention type
+            q, k, v = target_layer._get_qkv(x)
             
             if target_layer.flash:
                 # Can't capture from flash attention easily
@@ -108,7 +110,7 @@ def modify_attention_for_capture(model, layer_idx):
                 return original_forward(*args, **kwargs)
             else:
                 # Manual attention
-                att = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1) ** 0.5))
+                att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(target_layer.hs))
                 att = att.masked_fill(target_layer.bias[:,:,:T,:T] == 0, float('-inf'))
                 att = target_layer.my_softmax(att)
                 
@@ -172,18 +174,24 @@ def plot_attention_on_axis(attention_weights, head_idx, ax, tokens=None, title=N
         heatmap_kwargs['vmax'] = 1.0
     
     # Create heatmap
-    sns.heatmap(att_matrix, **heatmap_kwargs)
+    hm = sns.heatmap(att_matrix, **heatmap_kwargs)
+    
+    # Set colorbar tick font size if colorbar is shown
+    if show_colorbar and hm.collections:
+        cbar = hm.collections[0].colorbar
+        if cbar:
+            cbar.ax.tick_params(labelsize=18)
     
     if title:
-        ax.set_title(title)
+        ax.set_title(title, fontsize=24)
     
     # Rotate labels if showing tokens
     if display_labels:
-        ax.tick_params(axis='x', rotation=45, labelsize=8)
-        ax.tick_params(axis='y', rotation=0, labelsize=8)
+        ax.tick_params(axis='x', rotation=45, labelsize=20)
+        ax.tick_params(axis='y', rotation=0, labelsize=20)
 
 
-def plot_attention_heatmap(attention_weights, head_idx, tokens=None, title=None, figsize=(12, 10), lock_color_range=True):
+def plot_attention_heatmap(attention_weights, head_idx, tokens=None, title=None, figsize=(18, 15), lock_color_range=True):
     """
     Plot attention heatmap for a specific head
     
@@ -209,7 +217,7 @@ def plot_attention_heatmap(attention_weights, head_idx, tokens=None, title=None,
         'cmap': 'Blues',
         'xticklabels': tokens if show_labels else True,
         'yticklabels': tokens if show_labels else True,
-        'cbar_kws': {'label': 'Attention Weight'},
+        'cbar_kws': {'label': 'Attention Weight', 'label_size': 20},
         'annot': False,  # Don't annotate with values to keep clean
         'fmt': '.3f'
     }
@@ -219,16 +227,22 @@ def plot_attention_heatmap(attention_weights, head_idx, tokens=None, title=None,
         heatmap_kwargs['vmax'] = 1.0
     
     # Create heatmap
-    sns.heatmap(att_matrix, **heatmap_kwargs)
+    hm = sns.heatmap(att_matrix, **heatmap_kwargs)
     
-    plt.title(title or f'Attention Heatmap - Head {head_idx}')
-    plt.xlabel('Key Position (tokens being attended to)')
-    plt.ylabel('Query Position (tokens doing the attending)')
+    # Set colorbar tick font size
+    if hm.collections:
+        cbar = hm.collections[0].colorbar
+        if cbar:
+            cbar.ax.tick_params(labelsize=18)
+    
+    plt.title(title or f'Attention Heatmap - Head {head_idx}', fontsize=28)
+    plt.xlabel('Key Position (tokens being attended to)', fontsize=22)
+    plt.ylabel('Query Position (tokens doing the attending)', fontsize=22)
     
     # Rotate x-axis labels if tokens are provided for better readability
     if show_labels:
-        plt.xticks(rotation=45, ha='right', fontsize=9)
-        plt.yticks(rotation=0, fontsize=9)
+        plt.xticks(rotation=45, ha='right', fontsize=20)
+        plt.yticks(rotation=0, fontsize=20)
     
     plt.tight_layout()
     plt.show()
@@ -252,7 +266,7 @@ def plot_multi_head_attention(attention_weights, tokens=None, layer_idx=None, ma
     cols = min(4, num_heads)
     rows = (num_heads + cols - 1) // cols
     
-    fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(8*cols, 6*rows))
     if rows == 1 and cols == 1:
         axes = [axes]
     elif rows == 1 or cols == 1:
@@ -279,16 +293,22 @@ def plot_multi_head_attention(attention_weights, tokens=None, layer_idx=None, ma
         att_matrix = attention_weights[0, head_idx].cpu().numpy()
         
         # Create heatmap
-        sns.heatmap(att_matrix, ax=ax, **heatmap_kwargs)
+        hm = sns.heatmap(att_matrix, ax=ax, **heatmap_kwargs)
         
-        ax.set_title(f'Head {head_idx}')
+        # Set colorbar tick font size
+        if hm.collections:
+            cbar = hm.collections[0].colorbar
+            if cbar:
+                cbar.ax.tick_params(labelsize=18)
+        
+        ax.set_title(f'Head {head_idx}', fontsize=24)
     
     # Hide extra subplots
     for idx in range(num_heads, len(axes)):
         axes[idx].set_visible(False)
     
     layer_title = f'Layer {layer_idx} - ' if layer_idx is not None else ''
-    fig.suptitle(f'{layer_title}Attention Patterns Across Heads', fontsize=16)
+    fig.suptitle(f'{layer_title}Attention Patterns Across Heads', fontsize=30)
     plt.tight_layout()
     plt.show()
 
