@@ -75,26 +75,71 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.head_out = nn.Identity() # These are just so we can track the vectors with hooks
-        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
-            self.head_audio_out = nn.Identity() # These are just so we can track the vectors with hooks
-            self.audio_mix_mean = nn.Identity() # These are just so we can track the vectors with hooks
+        self.head_out = nn.Identity()  # These are just so we can track the vectors with hooks
+        if config.transformer_type in ['shadow_audio', 'attention_only_shadow'] and config.audio_dim > 0:
+            self.head_audio_out = nn.Identity()  # These are just so we can track the vectors with hooks
+            self.audio_mix_mean = nn.Identity()  # These are just so we can track the vectors with hooks
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if config.softmax_off_by_one:
             self.flash = False
             print("Disabling flash attention because softmax_off_by_one is enabled")
-        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
-            self.flash = False # use manual attention for audio case to get att weights
+        if config.transformer_type in ['shadow_audio', 'attention_only_shadow'] and config.audio_dim > 0:
+            self.flash = False  # use manual attention for audio case to get att weights
         self.my_softmax = OffByOneSoftmax() if config.softmax_off_by_one else StandardSoftmax()
+
+        # ROPE setup
+        self.use_rope = (config.posenc_type == 'rope')
+        if self.use_rope:
+            assert self.hs % 2 == 0, "head size must be even for ROPE"
+            freqs_complex = self._precompute_freqs(self.hs, config.block_size, config.rope_theta)
+            # shape: (block_size, hs//2) complex tensor with unit magnitude and phase for each position
+            self.register_buffer('freqs_complex', freqs_complex)
+
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0 or non-shadow mode")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
-        if config.transformer_type == 'shadow_audio' and config.audio_dim > 0:
+        if config.transformer_type in ['shadow_audio', 'attention_only_shadow'] and config.audio_dim > 0:
             self.forward = self._forward_with_audio
         else:
             self.forward = self._forward_without_audio
+
+    @staticmethod
+    def _precompute_freqs(head_dim: int, seq_len: int, theta: float) -> torch.Tensor:
+        """
+        Precompute complex exponentials e^{i * (pos * freq)} for ROPE.
+        Returns a complex64 tensor of shape (seq_len, head_dim//2).
+        """
+        device = torch.device('cpu')
+        inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+        positions = torch.arange(seq_len, device=device).float()
+        angles = torch.outer(positions, inv_freq)  # (seq_len, head_dim//2)
+        # cis = cos + i sin as a complex tensor with magnitude 1
+        freqs_cis = torch.polar(torch.ones_like(angles), angles).to(torch.complex64)
+        return freqs_cis
+
+    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, T: int):
+        """
+        Apply rotary positional embeddings to queries and keys.
+        q, k: (B, nh, T, hs) with hs even.
+        """
+        # Fetch needed slice; shape (T, hs//2) complex
+        freqs = self.freqs_complex[:T]  # device already correct via register_buffer
+        # do math in float32 for stability
+        B, nh, _, hs = q.shape
+        q_float = q.float().reshape(B, nh, T, hs // 2, 2)
+        k_float = k.float().reshape(B, nh, T, hs // 2, 2)
+        q_complex = torch.view_as_complex(q_float.contiguous())
+        k_complex = torch.view_as_complex(k_float.contiguous())
+        # Broadcast freqs to (1,1,T,hs//2)
+        freqs_b = freqs.unsqueeze(0).unsqueeze(0)
+        q_rot = q_complex * freqs_b
+        k_rot = k_complex * freqs_b
+        # Convert back to real and original dtype/shape
+        q_out = torch.view_as_real(q_rot).reshape(B, nh, T, hs).to(dtype=q.dtype)
+        k_out = torch.view_as_real(k_rot).reshape(B, nh, T, hs).to(dtype=k.dtype)
+        return q_out, k_out
 
     def _get_qkv(self, x):
         raise NotImplementedError("Subclasses must implement _get_qkv")
@@ -103,19 +148,23 @@ class CausalSelfAttention(nn.Module):
         raise NotImplementedError("Subclasses must implement _combine_heads")
 
     def _forward_without_audio(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         q, k, v = self._get_qkv(x)
+        if self.use_rope:
+            q, k = self._apply_rope(q, k, T)
 
         # causal self-attention
         if self.flash:
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True
+            )
         else:
             # manual attention implementation
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.hs))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
             att = self.my_softmax(att)
-            att_drop = self.attn_dropout(att) # dropout often disabled. 
+            att_drop = self.attn_dropout(att)  # dropout often disabled.
             y = att_drop @ v
         y = self.head_out(y)
 
@@ -126,13 +175,15 @@ class CausalSelfAttention(nn.Module):
         return y
 
     def _forward_with_audio(self, x, audio_norm):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         q, k, v = self._get_qkv(x)
+        if self.use_rope:
+            q, k = self._apply_rope(q, k, T)
 
         # Always use manual attention for audio case to get att weights
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.hs))
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         att = self.my_softmax(att)
         att_drop = self.attn_dropout(att)
         y = att_drop @ v
@@ -144,7 +195,7 @@ class CausalSelfAttention(nn.Module):
         audio_norm = audio_norm.unsqueeze(1)  # (B, 1, T, Da)
         audio_mixed = torch.matmul(att_drop, audio_norm)  # (B, nh, T, T) @ (B, 1, T, Da) -> (B, nh, T, Da)
         audio_mixed = self.head_audio_out(audio_mixed)
-        audio_mixed = self.audio_mix_mean(audio_mixed.mean(dim=1))  # average over heads (B, T, Da) does it make sense if this is the average?
+        audio_mixed = self.audio_mix_mean(audio_mixed.mean(dim=1))  # average over heads (B, T, Da)
 
         # output projection for y
         y = self.resid_dropout(self.c_proj(y))
@@ -250,7 +301,7 @@ class Block(nn.Module):
         self.mlp = MLP(config)
         self.attn_resid = ResidualAdd()
         self.mlp_resid = ResidualAdd()
-        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        enable_audio = (config.transformer_type in ['shadow_audio', 'attention_only_shadow']) and config.audio_dim > 0
         if enable_audio:
             self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
             self.audio_attn_resid = ResidualAdd()
@@ -289,7 +340,7 @@ class AttentionOnlyBlock(nn.Module):
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = create_attention(config)
         self.attn_resid = ResidualAdd()
-        enable_audio = config.transformer_type == 'shadow_audio' and config.audio_dim > 0
+        enable_audio = (config.transformer_type in ['shadow_audio', 'attention_only_shadow']) and config.audio_dim > 0
         if enable_audio:
             self.audio_ln1 = LayerNorm(config.audio_dim, bias=config.bias)
             self.audio_attn_resid = ResidualAdd()
@@ -398,7 +449,8 @@ class GPTConfig:
     softmax_off_by_one: bool = False
     attention_type: str = 'standard'  # 'standard', 'projected_full', 'identity_full'
     shadow_audio_residual: str = "unnormalised_residual"  # "unnormalised_residual" or "normalised_residual"
-    disable_last_mlp: bool = False  # if True, skip MLP in the final transformer block
+    disable_last_mlp: bool = False # if True, skip MLP in the final transformer block
+    rope_theta: float = 10000.0
 
 class GPT(nn.Module):
 
@@ -428,7 +480,7 @@ class GPT(nn.Module):
         elif config.posenc_type == "sinusoidal":
             # build fixed (non-trainable) sinusoidal embeddings
             pos_emb = self._build_sinusoidal_embedding(config.block_size, config.n_embd)
-        elif config.posenc_type in ("zeropad", "none"):
+        elif config.posenc_type in ("zeropad", "none", "rope"):
             pos_emb = None
         else:
             raise ValueError(f"Invalid posenc_type: {config.posenc_type}")
@@ -526,7 +578,7 @@ class GPT(nn.Module):
             x = self.pos_add(tok_emb, self.config.posenc_scale * pos_emb)
         elif self.config.posenc_type == "zeropad":
             x = self._pad_token_batch(tok_emb)
-        else:  # "none"
+        else: # "none" or "rope"
             x = tok_emb
 
         # --- transformer body ---
@@ -564,7 +616,7 @@ class GPT(nn.Module):
         elif self.config.posenc_type == "zeropad":
             x = self._pad_token_batch(tok_emb)
             audio = audio_emb  # no zeropad for audio in simple case
-        else:  # "none"
+        else: # "none" or "rope"
             x = tok_emb
             audio = audio_emb
 

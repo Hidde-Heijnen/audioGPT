@@ -90,7 +90,8 @@ use_sink_token = False
 softmax_off_by_one = False
 attention_type = 'standard' # 'standard', 'projected_full', 'identity_full'
 shadow_audio_residual = "unnormalised_residual"  # "unnormalised_residual" or "normalised_residual"
-disable_last_mlp = False  # if True, skip MLP in the final transformer block
+disable_last_mlp = False # if True, skip MLP in the final transformer block
+rope_theta = 10000.0
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -271,6 +272,7 @@ model_args['softmax_off_by_one'] = softmax_off_by_one
 model_args['attention_type'] = attention_type
 model_args['shadow_audio_residual'] = shadow_audio_residual
 model_args['disable_last_mlp'] = disable_last_mlp
+model_args['rope_theta'] = rope_theta
 
 if init_from == 'scratch':
     # init a new model from scratch
@@ -289,7 +291,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda', 'attention_type', 'shadow_audio_residual', 'disable_last_mlp']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda', 'use_sink_token', 'softmax_off_by_one', 'attention_type', 'shadow_audio_residual', 'disable_last_mlp', 'rope_theta']:
         model_args[k] = checkpoint_model_args[k]
         # Update config for wandb logging if key exists in config
         if k in config:
@@ -313,7 +315,7 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda', 'attention_type', 'shadow_audio_residual', 'disable_last_mlp']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'posenc_type', 'embed_dim_token', 'extra_dim', 'posenc_scale', 'audio_dim', 'transformer_type', 'shadow_auxiliary_loss', 'audio_alignment_lambda', 'attention_type', 'shadow_audio_residual', 'disable_last_mlp', 'rope_theta']:
         model_args[k] = getattr(model.config, k)
         # Update config for wandb logging if key exists in config
         if k in config:
