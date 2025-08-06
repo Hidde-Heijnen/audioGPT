@@ -55,7 +55,7 @@ n_layer = 12
 n_head = 12
 n_embd = 768
 # Positional-encoding defaults
-posenc_type = 'learned'  # 'learned' | 'zeropad' | 'sinusoidal' | 'none'
+posenc_type = 'learned'  # 'learned' | 'zeropad' | 'sinusoidal' | 'none' | 'rope'
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 # Positional-encoding scale (multiplies positional embeddings when posenc_type is learned or sinusoidal)
 posenc_scale = 1.0
