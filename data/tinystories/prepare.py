@@ -1,3 +1,4 @@
+# %%
 import os
 import json
 from collections import Counter
@@ -5,25 +6,164 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 import numpy as np
 import sys
-import pickle # Added for .pkl output
+import pickle
+import pandas as pd
+from pathlib import Path
+from tqdm import tqdm
 
-# Path and import changes for prepare.py moved into data/tinystories
-from tokenizer import Tokenizer # Import directly as tokenizer.py is in the same directory
+# Add the workspace root to path to import tokenizer
+workspace_root = os.path.join(os.path.dirname(__file__), '..', '..')
+sys.path.insert(0, workspace_root)
+from tokenizer import get_tokenizer, Tokenizer
 
 # DATA_DIR is the directory where this script (prepare.py) is located.
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Legacy files for original custom tokenizer approach
 RAW_TRAIN_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT3-train-og.txt")
 RAW_VALID_FILE = os.path.join(DATA_DIR, "TinyStoriesV2-GPT3-valid-og.txt")
 TOKEN_COUNTS_FILE = os.path.join(DATA_DIR, "tinystories_token_counts.json")
 SPECIAL_TOKENS_MAP_FILE = os.path.join(DATA_DIR, "special_tokens_map.json")
-TOKENIZER_CONFIG_NAME = "EleutherAI/gpt-neo-125M" # Changed from "gpt2"
+TOKENIZER_CONFIG_NAME = "EleutherAI/gpt-neo-125M"
 TOP_K = 10000
 
+# Legacy output files
 TRAIN_BIN_FILE = os.path.join(DATA_DIR, "train-og.bin")
 VALID_BIN_FILE = os.path.join(DATA_DIR, "val-og.bin")
-META_FILE = os.path.join(DATA_DIR, "meta.pkl") # Changed from meta.json to meta.pkl
+META_FILE = os.path.join(DATA_DIR, "meta.pkl")
 
+# %%
+def build_vocab_from_stories_with_progress(stories: list, pattern: str, max_vocab_size: int):
+    """
+    Build vocabulary from stories list - process all at once
+    """
+    import regex as re
+    from collections import Counter
+    
+    print("Processing all stories to build vocabulary...")
+    
+    # Process all stories at once
+    all_tokens = []
+    for story in tqdm(stories, desc="Tokenizing stories"):
+        story_tokens = re.findall(pattern, story.lower())
+        all_tokens.extend(story_tokens)
+    
+    # Count tokens
+    print("Counting token frequencies...")
+    token_counts = Counter(all_tokens)
+    print(f"Found {len(token_counts)} unique tokens")
+    
+    # Import SPECIAL_TOKENS from tokenizer to ensure consistency  
+    from tokenizer import SPECIAL_TOKENS
+    special_token_values = list(set(SPECIAL_TOKENS.values()))  # Remove duplicates
+    num_reserved = 0
+    for st in special_token_values:
+        if st not in token_counts:
+            num_reserved += 1
+
+    if max_vocab_size > 0:
+        print(f"Selecting top {max_vocab_size - num_reserved} tokens...")
+        most_common_tokens = token_counts.most_common(max_vocab_size - num_reserved)
+        vocab_tokens = [token for token, _ in most_common_tokens]
+    else:
+        vocab_tokens = list(token_counts.keys())
+
+    vocab = {token: idx for idx, token in enumerate(vocab_tokens)}
+
+    print(f"Ensuring special tokens are in vocab: {special_token_values}")
+    for special_token in special_token_values:
+        if special_token not in vocab:
+            vocab[special_token] = len(vocab)
+            print(f"Added special token: {special_token}")
+
+    if max_vocab_size > 0:
+        assert len(vocab) <= max_vocab_size
+
+    return vocab, token_counts
+
+
+# %%
+def encode_stories_to_binary(stories, tokenizer, output_path):
+    """
+    Encode stories using tokenizer and save as binary file
+    """
+    print(f"Encoding {len(stories)} stories...")
+    
+    all_token_ids = []
+    
+    for story in tqdm(stories, desc="Encoding stories"):
+        # Tokenize the story with special tokens
+        token_ids = tokenizer(
+            story, 
+            padding=False,
+            truncation=True,
+            max_length=1024,
+            return_tensors='pt',
+            add_special_tokens=True  # This adds BOS and EOS tokens
+        )['input_ids']
+        
+        # Convert to list and extend
+        all_token_ids.extend(token_ids.cpu().numpy().flatten().tolist())
+    
+    print(f"Total tokens: {len(all_token_ids)}")
+    
+    # Convert to numpy array and save
+    token_ids_np = np.array(all_token_ids, dtype=np.uint16)
+    print(f"Saving to {output_path}")
+    token_ids_np.tofile(output_path)
+    
+    return len(all_token_ids)
+
+
+# %%
+def create_metadata(tokenizer, output_path):
+    """
+    Create metadata file in nanoGPT format
+    """
+    print("Creating metadata...")
+    
+    # Get the actual vocabulary size from the tokenizer
+    base_vocab_size = tokenizer.vocab_size
+    
+    # For some tokenizers, special tokens are added outside base vocab
+    # We need to include them in the metadata
+    try:
+        max_token_id = max(tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.unk_token_id)
+        actual_vocab_size = max(base_vocab_size, max_token_id + 1)
+    except:
+        actual_vocab_size = base_vocab_size
+    
+    print(f"Base vocab size: {base_vocab_size}")
+    print(f"Actual vocab size for metadata: {actual_vocab_size}")
+    
+    # Create itos (integer to string mapping)
+    itos = []
+    for i in tqdm(range(actual_vocab_size), desc="Creating itos mapping"):
+        try:
+            token = tokenizer.decode([i])
+            itos.append(token)
+        except:
+            itos.append(f"<unk_{i}>")  # Fallback for any issues
+    
+    # Create stoi (string to integer mapping)
+    stoi = {s: i for i, s in enumerate(itos)}
+    
+    meta = {
+        'vocab_size': actual_vocab_size,
+        'itos': itos,
+        'stoi': stoi,
+    }
+    
+    with open(output_path, 'wb') as f:
+        pickle.dump(meta, f)
+    
+    print(f"Metadata saved to {output_path}")
+    print(f"Vocabulary size: {actual_vocab_size}")
+    
+    return meta
+
+
+# %%
 def load_special_tokens(file_path):
     with open(file_path, 'r') as f:
         special_tokens_map = json.load(f)
@@ -102,22 +242,228 @@ def generate_token_counts(base_tokenizer_name, special_tokens_dict):
     print("Token counts saved.")
 
 
+# %%
+def prepare_tinystories_dataset(
+    tokenizer_name="word_level", 
+    vocab_size=0, 
+    output_subdir="word",
+    model_name=None,
+    use_parquet=True
+):
+    """
+    Unified function to prepare tinystories dataset with any tokenizer
+    
+    Args:
+        tokenizer_name (str): Type of tokenizer to use. 
+                            Options: "word_level", "word_level_pmod", "byte_pair", "word_piece", "huggingface", "custom"
+        vocab_size (int): Vocabulary size (0 for full vocabulary)
+        output_subdir (str): Name of output subdirectory (default: "word")
+        model_name (str, optional): HuggingFace model name for "huggingface" tokenizer type
+        use_parquet (bool): Use tinystories.parquet if available, otherwise download from HuggingFace
+    """
+    print(f"Preparing tinystories dataset with {tokenizer_name} tokenizer")
+    print(f"Vocab size: {vocab_size} (0 = full vocab)")
+    
+    # Set up paths
+    data_dir = DATA_DIR
+    dataset_path = os.path.join(data_dir, "tinystories.parquet")
+    
+    # Create output directory
+    output_dir = os.path.join(data_dir, output_subdir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Output files
+    train_bin_path = os.path.join(output_dir, "train.bin")
+    val_bin_path = os.path.join(output_dir, "val.bin")
+    meta_path = os.path.join(output_dir, "meta.pkl")
+    
+    print(f"Output directory: {output_dir}")
+    
+    # Load dataset
+    print("Loading tinystories dataset...")
+    if use_parquet and os.path.exists(dataset_path):
+        print(f"Loading from parquet: {dataset_path}")
+        stories_df = pd.read_parquet(dataset_path, engine='fastparquet')
+        train_stories = stories_df[stories_df['split'] == 'train']['story'].tolist()
+        val_stories = stories_df[stories_df['split'] == 'val']['story'].tolist()
+    else:
+        print("Loading from HuggingFace dataset...")
+        dataset = load_dataset("roneneldan/TinyStories", trust_remote_code=True)
+        train_stories = [example["text"] for example in dataset["train"]]
+        val_stories = [example["text"] for example in dataset["validation"]]
+    
+    print(f"Train stories: {len(train_stories)}")
+    print(f"Validation stories: {len(val_stories)}")
+    
+    # Get tokenizer based on type
+    if tokenizer_name == "custom":
+        # Use the original custom tokenizer approach
+        return prepare_with_custom_tokenizer(train_stories, val_stories, output_dir)
+    
+    # Use the unified tokenizer from tokenizer.py
+    print(f"Initializing tokenizer: {tokenizer_name}")
+    if tokenizer_name == "huggingface":
+        if model_name is None:
+            raise ValueError("model_name must be provided when using 'huggingface' tokenizer")
+        tokenizer = get_tokenizer(
+            tokenizer_name=tokenizer_name,
+            dataset_name="tiny_stories",
+            vocab_size=vocab_size,
+            built_vocab=False,
+            model_name=model_name
+        )
+    elif tokenizer_name in ("word_level", "word_level_pmod"):
+        # For word-level tokenizers, we need to build vocab from our local data
+        from tokenizer import get_word_level_tokenizer, build_vocab_from_data, get_regex_pattern, turn_list_of_stories_into_string, SPECIAL_TOKENS
+        
+        print("Building vocabulary from local tinystories data...")
+        
+        # Use full dataset
+        all_stories = train_stories + val_stories
+        print(f"Total stories to process: {len(all_stories)}")
+        
+        # Get the regex pattern for tokenization
+        separate_possessive = tokenizer_name == "word_level_pmod"
+        pattern = get_regex_pattern(seperate_possesive=separate_possessive)
+        
+        # Build vocabulary with progress bar
+        vocab, token_counts = build_vocab_from_stories_with_progress(all_stories, pattern, vocab_size)
+        
+        # Ensure special tokens are in vocab
+        special_tokens_added = []
+        for special_token in SPECIAL_TOKENS.values():
+            if special_token not in vocab:
+                vocab[special_token] = len(vocab)
+                special_tokens_added.append(special_token)
+        
+        print(f"Built vocabulary with {len(vocab)} tokens")
+        print(f"Special tokens: {list(set(SPECIAL_TOKENS.values()))}")
+        if special_tokens_added:
+            print(f"Added missing special tokens: {special_tokens_added}")
+        
+        # Create the tokenizer
+        tokenizer = get_word_level_tokenizer(vocab, seperate_possesive=separate_possessive)
+    else:
+        tokenizer = get_tokenizer(
+            tokenizer_name=tokenizer_name,
+            dataset_name="tiny_stories",
+            vocab_size=vocab_size,
+            built_vocab=False
+        )
+    
+    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
+    
+    # Encode and save binary files
+    print(f"\nEncoding training data ({len(train_stories)} stories)...")
+    train_tokens = encode_stories_to_binary(train_stories, tokenizer, train_bin_path)
+    
+    print(f"\nEncoding validation data ({len(val_stories)} stories)...")
+    val_tokens = encode_stories_to_binary(val_stories, tokenizer, val_bin_path)
+    
+    # Create metadata
+    create_metadata(tokenizer, meta_path)
+    
+    print(f"\nDataset preparation complete!")
+    print(f"Output files:")
+    print(f"  - Train binary: {train_bin_path} ({train_tokens} tokens)")
+    print(f"  - Val binary: {val_bin_path} ({val_tokens} tokens)")
+    print(f"  - Metadata: {meta_path}")
+    
+    return {
+        'train_tokens': train_tokens,
+        'val_tokens': val_tokens,
+        'vocab_size': tokenizer.vocab_size,
+        'output_dir': output_dir
+    }
+
+
+# %%
+def prepare_with_custom_tokenizer(train_stories, val_stories, output_dir):
+    """
+    Legacy function for custom tokenizer approach (original prepare.py behavior)
+    """
+    print("Using custom tokenizer approach...")
+    
+    # Save stories to text files for custom tokenizer
+    train_file = os.path.join(output_dir, "train_temp.txt")
+    val_file = os.path.join(output_dir, "val_temp.txt")
+    
+    with open(train_file, 'w', encoding='utf-8') as f:
+        for story in train_stories:
+            f.write(story + '\n')
+    
+    with open(val_file, 'w', encoding='utf-8') as f:
+        for story in val_stories:
+            f.write(story + '\n')
+    
+    # Use original custom tokenizer logic
+    special_tokens = {
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>"
+    }
+    
+    class TokenizerConfig:
+        def __init__(self, name):
+            self.name = name
+    
+    custom_tokenizer_config = TokenizerConfig(TOKENIZER_CONFIG_NAME)
+    custom_tokenizer = Tokenizer(
+        config=custom_tokenizer_config,
+        k=TOP_K,
+        file_path=None,  # Will build from data
+        device="cpu"
+    )
+    
+    # Encode files with custom tokenizer
+    train_bin = os.path.join(output_dir, "train.bin")
+    val_bin = os.path.join(output_dir, "val.bin")
+    
+    encode_file_with_custom_tokenizer(train_file, custom_tokenizer, train_bin)
+    encode_file_with_custom_tokenizer(val_file, custom_tokenizer, val_bin)
+    
+    # Create metadata
+    vocab_size = custom_tokenizer.vocab_size
+    itos = [custom_tokenizer.tokenizer.decode([int(token_id_str)]) for token_id_str in custom_tokenizer.top_k_tokens]
+    stoi = {s: i for i, s in enumerate(itos)}
+    
+    meta = {
+        'vocab_size': vocab_size,
+        'itos': itos,
+        'stoi': stoi,
+    }
+    
+    meta_path = os.path.join(output_dir, "meta.pkl")
+    with open(meta_path, 'wb') as f:
+        pickle.dump(meta, f)
+    
+    # Clean up temp files
+    os.remove(train_file)
+    os.remove(val_file)
+    
+    print(f"Custom tokenizer dataset complete!")
+    return {
+        'train_tokens': len(itos),  # Approximate
+        'val_tokens': len(itos),    # Approximate
+        'vocab_size': vocab_size,
+        'output_dir': output_dir
+    }
+
+
+# %%
 def encode_file_with_custom_tokenizer(filepath, tokenizer_instance, output_path):
     all_token_ids = []
     print(f"Tokenizing {filepath} with custom tokenizer logic...")
 
     # Determine the OOV token index from the custom tokenizer (typically EOS's new index)
-    # The tokenizer.py now ensures eos_token_id_str is in top_k_tokens_dict if k is used.
     eos_token_id_str_from_base = str(tokenizer_instance.tokenizer.eos_token_id)
     oov_token_new_idx = tokenizer_instance.top_k_tokens_dict.get(eos_token_id_str_from_base)
     if oov_token_new_idx is None:
-        if tokenizer_instance.top_k_tokens_dict: # If dict is not empty but EOS is missing (should not happen with new tokenizer.py)
-            # Fallback to the last token in the custom vocab as OOV if EOS is unexpectedly not there
+        if tokenizer_instance.top_k_tokens_dict:
             oov_token_new_idx = len(tokenizer_instance.top_k_tokens_dict) - 1 
             print(f"Warning: EOS token ID {eos_token_id_str_from_base} not found in custom vocab map. Using {oov_token_new_idx} as OOV index.")
-        elif tokenizer_instance.k : # k is active but dict is empty (error)
+        elif tokenizer_instance.k:
              raise ValueError("Critical: Custom tokenizer's top_k_tokens_dict is empty when k is active.")
-        # if not k, then oov_token_new_idx won't be used by the mapping loop below if not self.k in tokenizer.encoder
 
     with open(filepath, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f):
@@ -125,29 +471,23 @@ def encode_file_with_custom_tokenizer(filepath, tokenizer_instance, output_path)
             if not line:
                 continue
             
-            # Tokenize using the base tokenizer. tokenizer.py's encoder now defaults to add_special_tokens=True.
-            # This call simulates what tokenizer_instance.encoder() would do for the first part.
             encoded_output = tokenizer_instance.tokenizer(
                 line,
-                add_special_tokens=True, # Let base tokenizer add BOS/EOS
+                add_special_tokens=True,
                 return_attention_mask=False,
                 return_token_type_ids=False,
-                truncation=True, # Recommended to add truncation and max_length matching training
+                truncation=True,
                 max_length=tokenizer_instance.tokenizer.model_max_length
             )
             original_ids = encoded_output['input_ids']
 
             new_ids_for_line = []
-            if tokenizer_instance.k: # Mapping to k-limited vocab is only if k is set
+            if tokenizer_instance.k:
                 for token_id in original_ids:
-                    # Map to new vocabulary, defaulting to the new OOV token index (EOS's new index)
                     mapped_id = tokenizer_instance.top_k_tokens_dict.get(str(token_id), oov_token_new_idx)
                     new_ids_for_line.append(mapped_id)
-            else: # If not k-limited, use original_ids directly
+            else:
                 new_ids_for_line.extend(original_ids)
-            
-            # Add the new OOV/EOS token ID at the end of each story's tokens
-            # new_ids_for_line.append(oov_token_new_idx) # No longer needed, add_special_tokens=True handles EOS.
             
             all_token_ids.extend(new_ids_for_line)
 
@@ -161,105 +501,137 @@ def encode_file_with_custom_tokenizer(filepath, tokenizer_instance, output_path)
     print(f"Saved to {output_path}.")
 
 
-def main():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    print("Step 1: Loading special tokens...")
-    if not os.path.exists(SPECIAL_TOKENS_MAP_FILE):
-        print(f"Error: Special tokens map file not found at {SPECIAL_TOKENS_MAP_FILE}")
-        print("Please ensure the file exists and contains the necessary token definitions.")
-        # Example: {"bos_token": {"content": "<|endoftext|>"}, ...}
-        # For now, creating a dummy one if it's missing, for the script to proceed.
-        # This part should ideally be handled by the user ensuring the file is present.
-        print(f"Attempting to create a dummy {SPECIAL_TOKENS_MAP_FILE} for demonstration if it is missing.")
-        # Check if the directory exists before creating the file
-        os.makedirs(os.path.dirname(SPECIAL_TOKENS_MAP_FILE), exist_ok=True)
-        dummy_special_tokens = {
-            "bos_token": {"content": "<|endoftext|>", "lstrip": False, "normalized": True, "rstrip": False, "single_word": False},
-            "eos_token": {"content": "<|endoftext|>", "lstrip": False, "normalized": True, "rstrip": False, "single_word": False},
-            "unk_token": {"content": "<|endoftext|>", "lstrip": False, "normalized": True, "rstrip": False, "single_word": False}
-        }
-        with open(SPECIAL_TOKENS_MAP_FILE, 'w') as f_dummy:
-            json.dump(dummy_special_tokens, f_dummy, indent=2)
-        print(f"Dummy {SPECIAL_TOKENS_MAP_FILE} created. Please verify its contents.")
-        
-    special_tokens = load_special_tokens(SPECIAL_TOKENS_MAP_FILE)
-    print(f"Special tokens loaded: {special_tokens}")
-
-    print("\\nStep 2: Downloading raw dataset files...")
-    download_data()
-
-    print("\\nStep 3: Generating token counts...")
-    generate_token_counts(TOKENIZER_CONFIG_NAME, special_tokens)
-
-    print(f"\\nStep 4: Initializing custom tokenizer with top {TOP_K} tokens...")
-    class TokenizerConfig:
-        def __init__(self, name):
-            self.name = name
-    custom_tokenizer_config = TokenizerConfig(TOKENIZER_CONFIG_NAME)
+# %%
+def create_tinystories_dataset(
+    tokenizer_name="word_level",
+    vocab_size=0,
+    output_subdir="word",
+    model_name=None,
+    use_parquet=True
+):
+    """
+    Create tinystories dataset with specified tokenizer
     
-    # The custom Tokenizer from tokenizer.py will initialize its own AutoTokenizer
-    # using `config.name`. It sets pad_token = eos_token.
-    # It's assumed that for TOKENIZER_CONFIG_NAME (e.g., "gpt2"), the default special tokens
-    # align with those in special_tokens_map.json (e.g., "<|endoftext|>").
-    custom_tokenizer = Tokenizer(
-        config=custom_tokenizer_config,
-        k=TOP_K,
-        file_path=TOKEN_COUNTS_FILE,
-        device="cpu" # Can be "cuda" if available and preferred
+    Args:
+        tokenizer_name (str): Type of tokenizer to use (default: "word_level")
+            Options: "word_level", "word_level_pmod", "byte_pair", "word_piece", "huggingface", "custom"
+        vocab_size (int): Vocabulary size (0 for full vocabulary)
+        output_subdir (str): Name of output subdirectory (default: "word")
+        model_name (str, optional): HuggingFace model name for "huggingface" tokenizer
+        use_parquet (bool): Use tinystories.parquet if available, otherwise download from HuggingFace
+    """
+    result = prepare_tinystories_dataset(
+        tokenizer_name=tokenizer_name,
+        vocab_size=vocab_size,
+        output_subdir=output_subdir,
+        model_name=model_name,
+        use_parquet=use_parquet
     )
-    print("Custom tokenizer initialized.")
-    tokenizer_details = custom_tokenizer.get_config()
-    print(f"Custom tokenizer details: {json.dumps(tokenizer_details, indent=2)}")
+    print(f"Outputed meta and binary files to {result['output_dir']}")
+    print(f"Amount of train tokens: {result['train_tokens']}")
+    print(f"Amount of val tokens: {result['val_tokens']}")
+    print(f"Vocabulary size: {result['vocab_size']}")
+    return result
 
 
-    print("\\nStep 5: Tokenizing train and validation data and saving as .bin files...")
-    encode_file_with_custom_tokenizer(RAW_TRAIN_FILE, custom_tokenizer, TRAIN_BIN_FILE)
-    encode_file_with_custom_tokenizer(RAW_VALID_FILE, custom_tokenizer, VALID_BIN_FILE)
-
-    print("\\nStep 6: Saving metadata in nanoGPT format (meta.pkl)...")
+# %%
+def create_dataset_with_huggingface_tokenizer(model_name, output_subdir="word_hf"):
+    """
+    Convenience function to create dataset with any HuggingFace tokenizer
     
-    # vocab_size is already correctly calculated by our custom_tokenizer
-    vocab_size = custom_tokenizer.vocab_size
-    
-    # Create itos (integer to string mapping)
-    # custom_tokenizer.top_k_tokens is a list of original token ID strings,
-    # ordered by their new vocabulary index.
-    itos = [custom_tokenizer.tokenizer.decode([int(token_id_str)]) for token_id_str in custom_tokenizer.top_k_tokens]
-    
-    # Create stoi (string to integer mapping)
-    stoi = {s: i for i, s in enumerate(itos)}
-    
-    meta_nano_gpt = {
-        'vocab_size': vocab_size,
-        'itos': itos,
-        'stoi': stoi,
-    }
-    
-    with open(META_FILE, 'wb') as f: # Open in binary mode for pickle
-        pickle.dump(meta_nano_gpt, f)
-    print(f"nanoGPT metadata saved to {META_FILE}")
-    print(f"  Vocabulary size: {vocab_size}")
-    # Example of itos/stoi content for verification (first 5 and last 5)
-    if vocab_size > 10:
-        print(f"  itos (first 5):")
-        for i, s_token in list(enumerate(itos))[:5]:
-            print(f"    {i}: '{s_token}'")
-        print(f"  itos (last 5):")
-        for i, s_token in list(enumerate(itos))[-5:]:
-            print(f"    {i}: '{s_token}'")
-    else:
-        print(f"  itos:")
-        for i, s_token in enumerate(itos):
-            print(f"    {i}: '{s_token}'")
+    Args:
+        model_name (str): HuggingFace model name (e.g., "microsoft/DialoGPT-medium", "EleutherAI/gpt-neo-125M")
+        output_subdir (str): Name of output subdirectory (default: "word_hf")
+    """
+    return create_tinystories_dataset(
+        tokenizer_name="huggingface", 
+        model_name=model_name,
+        output_subdir=output_subdir
+    )
 
 
-    print("\\nData preparation complete.")
-    print(f"Output files are in: {DATA_DIR}")
-    print(f"  Token counts: {TOKEN_COUNTS_FILE}")
-    print(f"  Train tokens: {TRAIN_BIN_FILE}")
-    print(f"  Valid tokens: {VALID_BIN_FILE}")
-    print(f"  Metadata: {META_FILE}")
+# %%
+def prepare_simplestories_tokenizer():
+    """
+    Prepare dataset with SimpleStories tokenizer (vocab size 4096)
+    """
+    print("Preparing tinystories dataset with SimpleStories tokenizer")
+    print("Vocab size: 4096")
+    
+    return create_tinystories_dataset(
+        tokenizer_name="word_piece",
+        vocab_size=4096,
+        output_subdir="dataset_ss_tok"
+    )
+
+
+# %%
+def main():
+    """
+    Main function - creates multiple datasets with different tokenizers
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
+    print("="*80)
+    print("UNIFIED TINYSTORIES DATASET PREPARATION")
+    print("="*80)
+    print("This script can create datasets with different tokenizers:")
+    print("1. word_level - Custom word-level tokenizer")
+    print("2. word_level_pmod - Word-level with possessive modification")
+    print("3. byte_pair - Byte-pair encoding (TinyStories)")
+    print("4. word_piece - Word-piece (SimpleStories)")
+    print("5. huggingface - Any HuggingFace tokenizer")
+    print("6. custom - Original custom tokenizer approach")
+    print("="*80)
+    
+    # Create default word-level dataset
+    print("\n" + "="*60)
+    print("Creating dataset with word_level tokenizer...")
+    print("="*60)
+    create_tinystories_dataset()
+    
+    # Create SimpleStories tokenized dataset
+    print("\n" + "="*60)
+    print("Creating dataset with SimpleStories tokenizer...")
+    print("="*60)
+    prepare_simplestories_tokenizer()
+    
+    print("\n" + "="*80)
+    print("DATASET PREPARATION COMPLETE!")
+    print("="*80)
+    print("Available datasets in subdirectories:")
+    print("- word/ (word_level tokenizer)")
+    print("- dataset_ss_tok/ (SimpleStories tokenizer)")
+    print("\nTo create additional datasets, use:")
+    print("python prepare.py with different function calls")
+    print("Examples:")
+    print('  create_tinystories_dataset("byte_pair", output_subdir="byte_pair")')
+    print('  create_dataset_with_huggingface_tokenizer("EleutherAI/gpt-neo-125M", "gpt_neo")')
+    print('  create_tinystories_dataset("custom", output_subdir="custom_legacy")')
+
+
+# Example usage functions for demonstration:
+def example_usage():
+    """
+    Example usage patterns
+    """
+    # Use default word_level tokenizer, full vocab, output to "word" folder
+    create_tinystories_dataset()
+    
+    # Use possessive-modified tokenizer
+    create_tinystories_dataset("word_level_pmod", output_subdir="word_pmod")
+    
+    # Use byte_pair tokenizer
+    create_tinystories_dataset("byte_pair", output_subdir="byte_pair")
+    
+    # Use GPT-Neo tokenizer
+    create_dataset_with_huggingface_tokenizer("EleutherAI/gpt-neo-125M", "gpt_neo")
+    
+    # Use SimpleStories tokenizer with specific vocab size
+    create_tinystories_dataset("word_piece", vocab_size=4096, output_subdir="simplestories_4k")
+    
+    # Use original custom tokenizer approach
+    create_tinystories_dataset("custom", output_subdir="custom_legacy")
 
 if __name__ == '__main__':
     main() 

@@ -16,38 +16,22 @@ from tokenizer import get_tokenizer
 # %%
 def build_vocab_from_stories_with_progress(stories: list, pattern: str, max_vocab_size: int):
     """
-    Build vocabulary from stories list with progress bars - more memory efficient
+    Build vocabulary from stories list - process all at once
     """
     import regex as re
-    import gc
     from collections import Counter
     
-    print("Processing stories in small batches to build vocabulary...")
+    print("Processing all stories to build vocabulary...")
     
-    token_counts = Counter()
-    batch_size = 1000  # Much smaller batches - 1k stories at a time
+    # Process all stories at once
+    all_tokens = []
+    for story in tqdm(stories, desc="Tokenizing stories"):
+        story_tokens = re.findall(pattern, story.lower())
+        all_tokens.extend(story_tokens)
     
-    for i in tqdm(range(0, len(stories), batch_size), desc="Processing story batches"):
-        batch_stories = stories[i:i+batch_size]
-        
-        # Process each story individually to save memory
-        for story in batch_stories:
-            story_tokens = re.findall(pattern, story.lower())
-            batch_counter = Counter(story_tokens)
-            token_counts.update(batch_counter)
-            
-            # Clean up immediately
-            del story_tokens, batch_counter
-        
-        # Force garbage collection every 10 batches
-        if i % (batch_size * 10) == 0:
-            gc.collect()
-        
-        # Free memory
-        del batch_stories
-    
-    # Final cleanup
-    gc.collect()
+    # Count tokens
+    print("Counting token frequencies...")
+    token_counts = Counter(all_tokens)
     print(f"Found {len(token_counts)} unique tokens")
     
     # Import SPECIAL_TOKENS from tokenizer to ensure consistency  
@@ -188,7 +172,7 @@ def prepare_simplestories_dataset(
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
     
-    stories_df = pd.read_parquet(dataset_path)
+    stories_df = pd.read_parquet(dataset_path, engine='fastparquet')
     print(f"Loaded {len(stories_df)} stories")
     
     # Split data first to get the stories for vocab building
@@ -221,15 +205,8 @@ def prepare_simplestories_dataset(
         
         print("Building vocabulary from local simplestories data...")
         
-        # For testing, let's use a smaller subset first
-        # Comment out these lines to use full dataset
-        print("Using subset for testing - processing first 50k stories")
-        train_subset = train_stories[:40000]  # First 40k train stories
-        val_subset = val_stories[:10000]      # First 10k val stories
-        all_stories = train_subset + val_subset
-        
-        # Uncomment these lines to use full dataset:
-        # all_stories = train_stories + val_stories
+        # Use full dataset
+        all_stories = train_stories + val_stories
         
         print(f"Total stories to process: {len(all_stories)}")
         
@@ -264,14 +241,9 @@ def prepare_simplestories_dataset(
     
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
     
-    # Use the same subset for encoding that we used for vocabulary building
-    if tokenizer_name in ("word_level", "word_level_pmod"):
-        # We used subsets for vocab building, so use them for encoding too
-        encoding_train_stories = train_subset if 'train_subset' in locals() else train_stories
-        encoding_val_stories = val_subset if 'val_subset' in locals() else val_stories
-    else:
-        encoding_train_stories = train_stories
-        encoding_val_stories = val_stories
+    # Use full datasets for encoding
+    encoding_train_stories = train_stories
+    encoding_val_stories = val_stories
     
     # Encode and save binary files
     print(f"\nEncoding training data ({len(encoding_train_stories)} stories)...")
@@ -350,3 +322,13 @@ def create_dataset_with_huggingface_tokenizer(model_name, output_subdir="word_hf
 if __name__ == "__main__":
     # Create simplestories dataset with word_level tokenizer, full vocab, in "word" subfolder
     create_simplestories_dataset()
+    
+    # Also create with SimpleStories tokenizer (word_piece) with 4096 vocab in "dataset_ss_tok" subfolder
+    print("\n" + "="*80)
+    print("Creating dataset with SimpleStories tokenizer (vocab_size=4096)...")
+    print("="*80)
+    create_simplestories_dataset(
+        tokenizer_name="word_piece",
+        vocab_size=4096,
+        output_subdir="dataset_ss_tok"
+    )
