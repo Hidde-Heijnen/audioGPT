@@ -388,23 +388,11 @@ def create_camstories_full_ss():
 
 # %%
 # Test the default word-level tokenizer
-create_dataset("camstories_10000")
-
-# %%
-# Test the new SimpleStories tokenizer integration
-print("\n" + "="*50)
-print("Testing SimpleStories tokenizer integration...")
-print("="*50)
-try:
-    result = create_dataset_with_simplestories_tokenizer("camstories_10000_ss")
-    print("\nSimpleStories tokenizer test PASSED!")
-    print(f"Created dataset in: {result['output_dir']}")
-except Exception as e:
-    print(f"SimpleStories tokenizer test FAILED: {e}")
+# create_dataset("camstories_10000"
 
 # %%
 # Uncomment the lines below to test other tokenizers
 # create_dataset_with_huggingface_tokenizer("camstories_10000", "SimpleStories/SimpleStories-35M")
-# create_camstories_full_ss()
+create_camstories_full_ss()
 
 # %%
