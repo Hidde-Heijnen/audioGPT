@@ -20,6 +20,7 @@ out-*/                     # nanoGPT default output dirs
 *.npz
 *.npy
 
+out/
 audio_output/
 
 # training logs and TensorBoard
