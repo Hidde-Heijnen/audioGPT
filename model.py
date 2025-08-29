@@ -94,6 +94,9 @@ class CausalSelfAttention(nn.Module):
             freqs_complex = self._precompute_freqs(self.hs, config.block_size, config.rope_theta)
             # shape: (block_size, hs//2) complex tensor with unit magnitude and phase for each position
             self.register_buffer('freqs_complex', freqs_complex)
+            # Disable flash attention when using ROPE since flash attention doesn't respect the rotated Q/K
+            self.flash = False
+            print("Disabling flash attention because ROPE is enabled")
 
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0 or non-shadow mode")

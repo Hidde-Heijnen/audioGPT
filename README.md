@@ -1,220 +1,130 @@
 # audioGPT
 
-This repository is part of my thesis work, based on [nanoGPT](https://github.com/karpathy/nanoGPT) by Andrej Karpathy. It provides a simple and efficient implementation for training and finetuning medium-sized GPTs. The code prioritizes practical implementation over educational purposes. The implementation is plain and readable, with a clean training loop and model definition that can be easily modified for different use cases.
+Word-level GPT with optional audio-shadow channel and practical training utilities. This is the repository for the MPhil thesis “Audio Interpretable Transformers,” which explores making transformers listenable by constraining representations to PCM audio. [Thesis PDF](https://www.hiddeh.com/thesis.pdf).
 
-## install
+We mainly build on our own CamStories-10k dataset and audio vectors ([CamStories-10k on Hugging Face](https://huggingface.co/datasets/Piros/CamStories-10k)), and originally started from the excellent [nanoGPT](https://github.com/karpathy/nanoGPT) codebase. The codebase has since diverged substantially: the model and trainer are purpose-built in `model.py` and `train.py`, with features for word-level tokenisation, rotary/alt positional encodings, attention variants, and an audio-shadow pathway with auxiliary losses.
 
-```
-pip install torch numpy transformers datasets tiktoken wandb tqdm
-```
-
-Dependencies:
-
-- [pytorch](https://pytorch.org) <3
-- [numpy](https://numpy.org/install/) <3
--  `transformers` for huggingface transformers <3 (to load GPT-2 checkpoints)
--  `datasets` for huggingface datasets <3 (if you want to download + preprocess OpenWebText)
--  `tiktoken` for OpenAI's fast BPE code <3
--  `wandb` for optional logging <3
--  `tqdm` for progress bars <3
-
-## quick start
-
-If you are not a deep learning professional and you just want to feel the magic and get your feet wet, the fastest way to get started is to train a character-level GPT on the works of Shakespeare. First, we download it as a single (1MB) file and turn it from raw text into one large stream of integers:
+## Install
 
 ```sh
-python data/shakespeare_char/prepare.py
+pip install torch numpy pandas pyarrow fastparquet transformers datasets tiktoken wandb tqdm
 ```
 
-This creates a `train.bin` and `val.bin` in that data directory. Now it is time to train your GPT. The size of it very much depends on the computational resources of your system:
+## What’s inside (aligned with `model.py` and `train.py`)
 
-**I have a GPU**. Great, we can quickly train a baby GPT with the settings provided in the [config/train_shakespeare_char.py](config/train_shakespeare_char.py) config file:
+- **Transformer types**: `normal_transformer`, `shadow_audio`, `attention_only`, `attention_only_shadow`.
+- **Attention variants**: `standard`, `projected_full`, `identity_full`.
+- **Positional encodings**: `learned`, `zeropad`, `sinusoidal`, `none`, `rope` (configurable `rope_theta`).
+- **Stability/mitigations**: optional sink token (`use_sink_token`), off-by-one softmax (`softmax_off_by_one`).
+- **Audio-shadow channel**: parallel audio embedding stream (`w_audio`) mixed via attention; optional auxiliary losses: `expected` or `target`.
+- **Other knobs**: disable last MLP (`disable_last_mlp`), weight tying, configurable dropout, etc.
+
+See `model.py` and `train.py` for the authoritative, up-to-date implementation.
+
+## Thesis context: Audio Interpretable Transformers
+
+### Core idea: making transformers listenable
+
+- Build interpretability into the representation space: make hidden states directly listenable as audio.
+- Replace the token embedding matrix (`W_E`) with a fixed dictionary of word-level PCM audio waveforms; tie the unembedding (`W_U = W_E^T`) so outputs are measured in the same audible basis.
+- Key finding: dot-product training alone encourages alignment at the final step but leaves large orthogonal components in the residual stream. These sound like noise yet do not affect logits, so additional constraints/diagnostics are needed beyond locked embeddings.
+
+### CamStories dataset
+
+- Foundation for all experiments: [CamStories-10k](https://huggingface.co/datasets/Piros/CamStories-10k). Built by merging, cleaning and normalizing TinyStories and SimpleStories into a high-quality corpus for Small Language Models (SLMs).
+- Fixed 10,000-word uncased vocabulary for word-level modeling; strict normalization (grammar/formatting) and balanced gender-neutral name replacement.
+- Per-token PCM audio (8 kHz, 4096 samples) for multimodal and audio-interpretable studies. Audio vectors live in `tokens_audio_10k.parquet` under `4096_vec`.
+
+### Architectural explorations
+
+- Positional encoding: RoPE (rotary) is preferred for listenability; it rotates queries/keys without injecting additive noise into values.
+- Attention sinks: when a head should abstain, off-by-one softmax ("softmax₁") avoids mixing irrelevant audio more cleanly than a dedicated sink token; both options exist in `train.py`.
+- Transparent attention: removing value/output projections keeps the value path an interpretable mixture of inputs (see `attention_type=identity_full` or `projected_full`). Removing MLP preserves listenability but harms LM performance (see `--disable_last_mlp` or `transformer_type=attention_only`).
+
+### The Shadow Audio Transformer
+
+- Practical diagnostic: run a parallel audio stream alongside a standard text transformer (`transformer_type=shadow_audio` or `attention_only_shadow`).
+- Each layer reuses the model's attention weights (optionally with softmax₁) to mix the original token waveforms. The resulting audio makes the model's focus audible: louder components correspond to tokens that most influenced the prediction.
+
+## Data: CamStories-10k and audio vectors
+
+- Primary corpus: [CamStories-10k](https://huggingface.co/datasets/Piros/CamStories-10k). Stories live in `camstories_10000.parquet`; audio vectors (8 kHz, length 4096) live in `tokens_audio_10k.parquet` under column `4096_vec`.
+- This repo includes prepared binaries and vocabs under `data/camstories/…` for convenience. To (re)create:
 
 ```sh
-python train.py config/train_shakespeare_char.py
+# Example: create word-level 10k data
+python -c "from data.camstories.prepare import create_dataset; create_dataset('camstories_10000')"
+
+# Example: create SimpleStories-tokenised variants
+python -c "from data.camstories.prepare import create_camstories_10k_ss"
 ```
 
-If you peek inside it, you'll see that we're training a GPT with a context size of up to 256 characters, 384 feature channels, and it is a 6-layer Transformer with 6 heads in each layer. On one A100 GPU this training run takes about 3 minutes and the best validation loss is 1.4697. Based on the configuration, the model checkpoints are being written into the `--out_dir` directory `out-shakespeare-char`. So once the training finishes we can sample from the best model by pointing the sampling script at this directory:
+- If you want to use locked token embeddings or the audio-shadow channel, place the audio vectors at:
+
+```
+data/audio_embedding/tokens_audio_10k.parquet
+```
+
+The training script will auto-detect dimensions from the `4096_vec` column.
+
+## Training
+
+All training happens via `train.py` (read the top of the file for defaults). Common examples:
+
+### 1) Baseline word-level LM (no audio)
 
 ```sh
-python sample.py --out_dir=out-shakespeare-char
+python train.py \
+  --dataset=camstories/10000 \
+  --batch_size=32 --compile=False
 ```
 
-This generates a few samples, for example:
-
-```
-ANGELO:
-And cowards it be strawn to my bed,
-And thrust the gates of my threats,
-Because he that ale away, and hang'd
-An one with him.
-
-DUKE VINCENTIO:
-I thank your eyes against it.
-
-DUKE VINCENTIO:
-Then will answer him to save the malm:
-And what have you tyrannous shall do this?
-
-DUKE VINCENTIO:
-If you have done evils of all disposition
-To end his power, the day of thrust for a common men
-That I leave, to fight with over-liking
-Hasting in a roseman.
-```
-
-lol  `¯\_(ツ)_/¯`. Not bad for a character-level model after 3 minutes of training on a GPU. Better results are quite likely obtainable by instead finetuning a pretrained GPT-2 model on this dataset (see finetuning section later).
-
-**I only have a macbook** (or other cheap computer). No worries, we can still train a GPT but we want to dial things down a notch. I recommend getting the bleeding edge PyTorch nightly ([select it here](https://pytorch.org/get-started/locally/) when installing) as it is currently quite likely to make your code more efficient. But even without it, a simple train run could look as follows:
+### 2) Shadow-audio transformer
 
 ```sh
-python train.py config/train_shakespeare_char.py --device=cpu --compile=False --eval_iters=20 --log_interval=1 --block_size=64 --batch_size=12 --n_layer=4 --n_head=4 --n_embd=128 --max_iters=2000 --lr_decay_iters=2000 --dropout=0.0
+python train.py \
+  --dataset=camstories/10000 \
+  --transformer_type=shadow_audio \
+  --shadow_audio_col=4096_vec \
+  --shadow_auxiliary_loss=expected \
+  --audio_alignment_lambda=1.0
 ```
 
-Here, since we are running on CPU instead of GPU we must set both `--device=cpu` and also turn off PyTorch 2.0 compile with `--compile=False`. Then when we evaluate we get a bit more noisy but faster estimate (`--eval_iters=20`, down from 200), our context size is only 64 characters instead of 256, and the batch size only 12 examples per iteration, not 64. We'll also use a much smaller Transformer (4 layers, 4 heads, 128 embedding size), and decrease the number of iterations to 2000 (and correspondingly usually decay the learning rate to around max_iters with `--lr_decay_iters`). Because our network is so small we also ease down on regularization (`--dropout=0.0`). This still runs in about ~3 minutes, but gets us a loss of only 1.88 and therefore also worse samples, but it's still good fun:
+This reads `data/audio_embedding/tokens_audio_10k.parquet`, builds the audio pathway (`w_audio`), mixes via attention, and adds the auxiliary loss.
+
+### 3) Locked token embeddings (use audio vectors as token embeddings)
 
 ```sh
-python sample.py --out_dir=out-shakespeare-char --device=cpu
-```
-Generates samples like this:
-
-```
-GLEORKEN VINGHARD III:
-Whell's the couse, the came light gacks,
-And the for mought you in Aut fries the not high shee
-bot thou the sought bechive in that to doth groan you,
-No relving thee post mose the wear
+python train.py \
+  --dataset=camstories/10000 \
+  --locked_embeddings=4096_vec
 ```
 
-Not bad for ~3 minutes on a CPU, for a hint of the right character gestalt. If you're willing to wait longer, feel free to tune the hyperparameters, increase the size of the network, the context length (`--block_size`), the length of training, etc.
+`train.py` detects the 4096-dim vectors, overrides `n_embd`, loads them into `wte` and automatically freezes token embeddings (weight tying keeps `lm_head` frozen as well). Optionally combine with the shadow-audio setup.
 
-Finally, on Apple Silicon Macbooks and with a recent PyTorch version make sure to add `--device=mps` (short for "Metal Performance Shaders"); PyTorch then uses the on-chip GPU that can *significantly* accelerate training (2-3X) and allow you to use larger networks. See [Issue 28](https://github.com/karpathy/nanoGPT/issues/28) for more.
+### Optional knobs (selected)
 
-## reproducing GPT-2
+- Positional encodings: `--posenc_type=rope --rope_theta=10000.0` (or `learned`, `sinusoidal`, `zeropad`, `none`).
+- Mitigations: `--use_sink_token=True` or `--softmax_off_by_one=True`.
+- Attention variants: `--attention_type=projected_full` or `identity_full`.
+- Final block without MLP: `--disable_last_mlp=True`.
 
-A more serious deep learning professional may be more interested in reproducing GPT-2 results. So here we go - we first tokenize the dataset, in this case the [OpenWebText](https://openwebtext2.readthedocs.io/en/latest/), an open reproduction of OpenAI's (private) WebText:
+## Sampling
 
 ```sh
-python data/openwebtext/prepare.py
+python sample.py --out_dir=out --start="Once upon a time" --num_samples=3 --max_new_tokens=100
 ```
 
-This downloads and tokenizes the [OpenWebText](https://huggingface.co/datasets/openwebtext) dataset. It will create a `train.bin` and `val.bin` which holds the GPT2 BPE token ids in one sequence, stored as raw uint16 bytes. Then we're ready to kick off training. To reproduce GPT-2 (124M) you'll want at least an 8X A100 40GB node and run:
+## Relationship to nanoGPT
 
-```sh
-torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
-```
+This project began as a fork/inspiration and still borrows the training loop style, CLI overrides, and overall ergonomics from [nanoGPT](https://github.com/karpathy/nanoGPT). However, the core model (`model.py`) and trainer (`train.py`) have been reworked to support word-level vocabularies, alternative positional encodings (including RoPE), attention variants, and an audio-shadow channel with auxiliary losses.
 
-This will run for about 4 days using PyTorch Distributed Data Parallel (DDP) and go down to loss of ~2.85. Now, a GPT-2 model just evaluated on OWT gets a val loss of about 3.11, but if you finetune it it will come down to ~2.85 territory (due to an apparent domain gap), making the two models ~match.
+## Citation and licence
 
-If you're in a cluster environment and you are blessed with multiple GPU nodes you can make GPU go brrrr e.g. across 2 nodes like:
+- Dataset: please cite CamStories-10k as described on its page: [CamStories-10k](https://huggingface.co/datasets/Piros/CamStories-10k).
+- Code: see `LICENSE` in this repository. The dataset is released under `cdla-sharing-1.0` per its page.
 
-```sh
-# Run on the first (master) node with example IP 123.456.123.456:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py
-# Run on the worker node:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
-```
+## Acknowledgements
 
-It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepend `NCCL_IB_DISABLE=1` to the above launches. Your multinode training will work, but most likely _crawl_. By default checkpoints are periodically written to the `--out_dir`. We can sample from the model by simply `python sample.py`.
-
-Finally, to train on a single GPU simply run the `python train.py` script. Have a look at all of its args, the script tries to be very readable, hackable and transparent. You'll most likely want to tune a number of those variables depending on your needs.
-
-## baselines
-
-OpenAI GPT-2 checkpoints allow us to get some baselines in place for openwebtext. We can get the numbers as follows:
-
-```sh
-$ python train.py config/eval_gpt2.py
-$ python train.py config/eval_gpt2_medium.py
-$ python train.py config/eval_gpt2_large.py
-$ python train.py config/eval_gpt2_xl.py
-```
-
-and observe the following losses on train and val:
-
-| model | params | train loss | val loss |
-| ------| ------ | ---------- | -------- |
-| gpt2 | 124M         | 3.11  | 3.12     |
-| gpt2-medium | 350M  | 2.85  | 2.84     |
-| gpt2-large | 774M   | 2.66  | 2.67     |
-| gpt2-xl | 1558M     | 2.56  | 2.54     |
-
-However, we have to note that GPT-2 was trained on (closed, never released) WebText, while OpenWebText is just a best-effort open reproduction of this dataset. This means there is a dataset domain gap. Indeed, taking the GPT-2 (124M) checkpoint and finetuning on OWT directly for a while reaches loss down to ~2.85. This then becomes the more appropriate baseline w.r.t. reproduction.
-
-## finetuning
-
-Finetuning is no different than training, we just make sure to initialize from a pretrained model and train with a smaller learning rate. For an example of how to finetune a GPT on new text go to `data/shakespeare` and run `prepare.py` to download the tiny shakespeare dataset and render it into a `train.bin` and `val.bin`, using the OpenAI BPE tokenizer from GPT-2. Unlike OpenWebText this will run in seconds. Finetuning can take very little time, e.g. on a single GPU just a few minutes. Run an example finetuning like:
-
-```sh
-python train.py config/finetune_shakespeare.py
-```
-
-This will load the config parameter overrides in `config/finetune_shakespeare.py` (I didn't tune them much though). Basically, we initialize from a GPT2 checkpoint with `init_from` and train as normal, except shorter and with a small learning rate. If you're running out of memory try decreasing the model size (they are `{'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}`) or possibly decreasing the `block_size` (context length). The best checkpoint (lowest validation loss) will be in the `out_dir` directory, e.g. in `out-shakespeare` by default, per the config file. You can then run the code in `sample.py --out_dir=out-shakespeare`:
-
-```
-THEODORE:
-Thou shalt sell me to the highest bidder: if I die,
-I sell thee to the first; if I go mad,
-I sell thee to the second; if I
-lie, I sell thee to the third; if I slay,
-I sell thee to the fourth: so buy or sell,
-I tell thee again, thou shalt not sell my
-possession.
-
-JULIET:
-And if thou steal, thou shalt not sell thyself.
-
-THEODORE:
-I do not steal; I sell the stolen goods.
-
-THEODORE:
-Thou know'st not what thou sell'st; thou, a woman,
-Thou art ever a victim, a thing of no worth:
-Thou hast no right, no right, but to be sold.
-```
-
-Whoa there, GPT, entering some dark place over there. I didn't really tune the hyperparameters in the config too much, feel free to try!
-
-## sampling / inference
-
-Use the script `sample.py` to sample either from pre-trained GPT-2 models released by OpenAI, or from a model you trained yourself. For example, here is a way to sample from the largest available `gpt2-xl` model:
-
-```sh
-python sample.py \
-    --init_from=gpt2-xl \
-    --start="What is the answer to life, the universe, and everything?" \
-    --num_samples=5 --max_new_tokens=100
-```
-
-If you'd like to sample from a model you trained, use the `--out_dir` to point the code appropriately. You can also prompt the model with some text from a file, e.g. ```python sample.py --start=FILE:prompt.txt```.
-
-## efficiency notes
-
-For simple model benchmarking and profiling, `bench.py` might be useful. It's identical to what happens in the meat of the training loop of `train.py`, but omits much of the other complexities.
-
-Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/). At the time of writing (Dec 29, 2022) this makes `torch.compile()` available in the nightly release. The improvement from the one line of code is noticeable, e.g. cutting down iteration time from ~250ms / iter to 135ms / iter. Nice work PyTorch team!
-
-## todos
-
-- Investigate and add FSDP instead of DDP
-- Eval zero-shot perplexities on standard evals (e.g. LAMBADA? HELM? etc.)
-- Finetune the finetuning script, I think the hyperparams are not great
-- Schedule for linear batch size increase during training
-- Incorporate other embeddings (rotary, alibi)
-- Separate out the optim buffers from model params in checkpoints I think
-- Additional logging around network health (e.g. gradient clip events, magnitudes)
-- Few more investigations around better init etc.
-
-## troubleshooting
-
-Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows). If you're running into related error messages try to disable this by adding `--compile=False` flag. This will slow down the code but at least it will run.
-
-For some context on this repository, GPT, and language modeling it might be helpful to watch my [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). Specifically, the [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is popular if you have some prior language modeling context.
-
-For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
-
-[![](https://dcbadge.vercel.app/api/server/3zy8kqD9Cp?compact=true&style=flat)](https://discord.gg/3zy8kqD9Cp)
-
-## acknowledgements
-
-All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
+- CamStories datasets and audio vectors (by me and Paulina Körner): [CamStories-10k](https://huggingface.co/datasets/Piros/CamStories-10k)
+- Training code inspiration: [nanoGPT](https://github.com/karpathy/nanoGPT)
